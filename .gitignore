@@ -1,0 +1,17 @@
+# 密钥（不进 git）
+.env
+
+# Python
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# 运行产物（体积大，可重新生成）
+results/
+
+# 编辑器
+.vscode/
+.idea/
+.DS_Store
