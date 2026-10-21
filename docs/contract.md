@@ -248,22 +248,31 @@ eval gate --baseline baseline.json --run results/<id>
 时间紧时的退让顺序是**砍薄、不砍掉**：先砍掉「四维质检卡片 + 区分度分布图」，只留「提交 + 进度条」，省 0.5 天。
 **不允许整个跳过**——那样项目名和交付物对不上。
 
-接口（薄版四个）：
+接口（薄版四个，**已定稿 2026-10-21**）：
 ```
 POST /api/tasks                  提交 {spec, strategy, n} → {task_id}
 GET  /api/tasks                  任务列表（状态 + 进度 done/total）
 GET  /api/tasks/{id}             详情 + 四维质检结果
-GET  /api/datasets               已有用例集
+GET  /api/datasets               已有用例集列表（供页面下拉选择）
 ```
+
+**第四个接口为什么是 `datasets` 而不是「结果」**（两条理由，定稿依据）：
+1. 「结果」和「详情」重复——`GET /api/tasks/{id}` 里本来就带四维质检结果，再开一个结果接口是同一份数据两个出口
+2. 生成 200 条约 10 元，**不该每次重生成**。页面要用 `datasets` 做下拉，直接展示磁盘上已有的集子，让人先看清有什么再决定要不要花钱
+
+**本版范围（写死，别扩张）**：
+- `POST /api/tasks` **只支持"生成新的"**：参数就是 `{spec, strategy, n}`
+- **不支持"拿已有数据集去跑评测"**——那是另一条链路（`eval run` 的活），留到后续版本，这一版不加
+- 也就是说：平台这一版只管「生成 + 质检」，评测对比仍然走 CLI
 
 状态机：`pending → running → done | failed`，**没有取消、没有重试队列**。
 并发：全局 `asyncio.Semaphore(2)`，目的是**防止连点把上游 API 打爆**，不是性能优化。
 
 **硬约束**：`server.py` 只调 `runner.py` / `generator/`，**不复制任何生成或评测逻辑**。
 
-**前端**（原生 HTML + fetch，无构建链）：提交区 + 任务列表 + 四个大数字 + 区分度分布图。
+**前端**（原生 HTML + fetch，无构建链）：提交区（spec / strategy / n）+ 任务列表 + 四个大数字 + 区分度分布图。
 
-**明确不做**：登录 / 多用户 / 权限 / WebSocket / Celery / Redis / 在线编辑评分规则。
+**明确不做**：登录 / 多用户 / 权限 / WebSocket / Celery / Redis / 在线编辑评分规则 / **用已有数据集跑评测**。
 
 ---
 
