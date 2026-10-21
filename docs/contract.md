@@ -240,11 +240,15 @@ eval gate --baseline baseline.json --run results/<id>
 
 **`eval discriminate` 是最核心的命令**——它决定"这条用例值不值得留"。
 
-### 7.1 平台层（薄服务，D17，可砍）
+### 7.1 平台层（薄服务，D19，必做薄版）
 
-**定位**：生成流水线的控制台，不是"又一个评测平台"。**时间紧就整个砍掉，不影响主线成立。**
+**定位**：生成流水线的控制台，不是"又一个评测平台"。
 
-接口（如果做）：
+**必做，但只做薄的一层。** 项目名里有"平台"，没有界面就名不副实；但这个项目的价值在方法论，不在 Web 工程。
+时间紧时的退让顺序是**砍薄、不砍掉**：先砍掉「四维质检卡片 + 区分度分布图」，只留「提交 + 进度条」，省 0.5 天。
+**不允许整个跳过**——那样项目名和交付物对不上。
+
+接口（薄版四个）：
 ```
 POST /api/tasks                  提交 {spec, strategy, n} → {task_id}
 GET  /api/tasks                  任务列表（状态 + 进度 done/total）
@@ -408,7 +412,7 @@ prompts/
   v2.txt           强 prompt（区分度的参考系）
 specs/
   extraction.yaml  任务规格
-web/               （可选）薄服务
+web/               D19 薄服务（必做，可砍薄）
 docs/
   annotation-guide.md  人工抽检指南
 ```
@@ -450,7 +454,7 @@ docs/
 ```
 运行时：python 3.11 / httpx / pydantic / typer / rich / python-dotenv
        pyyaml（spec）/ matplotlib（出图）
-服务：  fastapi / uvicorn（可选薄服务）
+服务：  fastapi / uvicorn（D19 薄服务，必做薄版）
 开发：  pytest / pytest-asyncio / pytest-cov / ruff
 工程：  Docker / GitHub Actions
 ```
