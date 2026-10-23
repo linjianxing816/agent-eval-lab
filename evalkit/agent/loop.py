@@ -50,6 +50,8 @@ class LoopResult:
     tool_calls_total: int
     messages: list[dict]          # 完整对话，D14 轨迹查看器要用
     per_step_tokens: list[int]    # 每轮请求的输入 token，D15 分析上下文膨胀
+    per_step_completion_tokens: list[int]   # 每轮输出的 token
+    per_step_ms: list[float]      # 每轮 LLM 往返耗时，D15 测每步延迟要用
 
 
 def call_signature(name: str, args: dict) -> str:
@@ -98,6 +100,8 @@ def run_task(client: ModelClient, sandbox: Sandbox, *, instruction: str, system_
         {"role": "user", "content": instruction},
     ]
     per_step_tokens: list[int] = []
+    per_step_completion: list[int] = []
+    per_step_ms: list[float] = []
     last_sig: str | None = None
     repeat_count = 0
     exit_reason = "step_limit"
@@ -113,6 +117,8 @@ def run_task(client: ModelClient, sandbox: Sandbox, *, instruction: str, system_
             # 前者说明前几步的动作已经发生在环境里，后者什么都没做。
             raise ChatError("第 {0} 步请求失败: {1}".format(step, exc)) from exc
         per_step_tokens.append(int(reply.usage.get("prompt_tokens", 0) or 0))
+        per_step_completion.append(int(reply.usage.get("completion_tokens", 0) or 0))
+        per_step_ms.append(float(reply.elapsed_ms))
         message = reply.message
         messages.append(message)                       # 规则 1：原样回填，不重建
         tool_calls = message.get("tool_calls") or []
@@ -147,4 +153,6 @@ def run_task(client: ModelClient, sandbox: Sandbox, *, instruction: str, system_
         tool_calls_total=sandbox.tool_calls_total,
         messages=messages,
         per_step_tokens=per_step_tokens,
+        per_step_completion_tokens=per_step_completion,
+        per_step_ms=per_step_ms,
     )
