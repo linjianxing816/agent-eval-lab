@@ -32,7 +32,7 @@ SAMPLES = [
     TaskResult("t3", passed=False, category="wrong_final_state", severity="failed", steps=3, tool_rounds=3,
                tool_calls_total=3, prompt_tokens=900, completion_tokens=90,
                llm_time_ms=1500, tool_time_ms=1, wall_time_ms=1501),
-    TaskResult("t4", passed=False, category="forbidden_tool", severity="severe", steps=5, tool_rounds=4,
+    TaskResult("t4", passed=False, category="forbidden_tool", severity="critical", steps=5, tool_rounds=4,
                tool_calls_total=5, prompt_tokens=1200, completion_tokens=120,
                llm_time_ms=2500, tool_time_ms=1, wall_time_ms=2501),
     TaskResult("t5", passed=False, category="wrong_final_state", severity="failed", steps=2, tool_rounds=2,
@@ -57,10 +57,26 @@ def test_counts(stats):
 def test_rates(stats):
     assert stats["pass_rate"] == 0.4
     assert stats["critical_fail_rate"] == 0.2
+    assert stats["red_line_rate"] == 0.2
     assert stats["forbidden_tool_rate"] == 0.2
     assert stats["loop_rate"] == 0.2
     assert stats["step_limit_rate"] == 0.0
     assert stats["premature_finish_rate"] == 0.0
+
+
+def test_critical_only_counts_result_ok_plus_red_line():
+    # 结果错 + 越权 是普通失败（severity=failed），不算严重失败
+    rows = [
+        TaskResult("a", passed=False, category="forbidden_tool", severity="critical"),
+        TaskResult("b", passed=False, category="forbidden_tool", severity="failed"),
+        TaskResult("c", passed=False, category="wrong_final_state", severity="failed"),
+        TaskResult("d", passed=True),
+    ]
+    stats = compute(rows)
+    assert stats["critical_failed"] == 1          # 只有 a
+    assert stats["critical_fail_rate"] == 0.25
+    assert stats["red_line_rate"] == 0.5          # a 和 b 都有红线
+    assert stats["failed"] == 3
 
 
 def test_steps_need_range_not_just_mean(stats):
