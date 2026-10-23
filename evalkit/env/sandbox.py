@@ -36,6 +36,9 @@ class TrajectoryStep:
     error: str | None    # 只在「工具内部抛异常」时非空，业务失败留 None
     repeated: bool = False   # 被判「循环」的那一条。第 3 次同参调用照常执行，但要标出来，
                              # 否则 D3 看到 3 条一样的轨迹，不知道哪条是触发点
+    malformed: bool = False  # 参数不是合法 JSON 对象（模型传参格式错）。
+                             # 不标的话 D4 的失败分布里 tool_call_malformed 永远是 0，
+                             # 明明发生了，显示没发生
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -70,6 +73,8 @@ class Sandbox:
     def call(self, name: str, args: Any, step: int, repeated: bool = False) -> dict:
         """执行一次工具调用。永远返回 dict，不抛异常。"""
         started = time.perf_counter()
+        # args 不是 dict = 模型给的 arguments 不是合法 JSON 对象，属于模型传参格式错
+        malformed = not isinstance(args, dict)
         result, error = self._execute(name, args)
         elapsed_ms = (time.perf_counter() - started) * 1000
         self._steps.append(
@@ -81,6 +86,7 @@ class Sandbox:
                 elapsed_ms=elapsed_ms,
                 error=error,
                 repeated=repeated,
+                malformed=malformed,
             )
         )
         return result

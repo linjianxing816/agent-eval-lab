@@ -11,9 +11,19 @@
 4. **空列表返回全 0**，不报错。
 
 【红线 / 黄线在这里也要分开】
-`critical_failed` 只数红线（`forbidden_tool` / `premature_finish`）；
-`loop_rate` / `step_limit_rate` 数黄线，它们**不进** `failure_distribution`——
-因为黄线的任务 `passed=True`，本来就不算失败。
+`critical_failed` 只数红线（`forbidden_tool` / `premature_finish` / `hallucinated_result` /
+`tool_call_malformed`）；`loop_rate` / `step_limit_rate` 数黄线，它们**不进**
+`failure_distribution`——因为黄线的任务 `passed=True`，本来就不算失败。
+
+【10 类失败里，哪几类目前产生不了（看到 0 别当成"没发生"）】
+| 类别 | 现状 | 什么时候接上 |
+|---|---|---|
+| `request_error` | **产生不了** | D12 批量跑的时候，runner 接住 `ChatError` |
+| `rate_limited` | **产生不了** | 同上（429 单独一类） |
+| `wrong_tool` | **产生不了** | D5 模板定了之后——"调了无关工具"要先有任务语义才能判 |
+| 其余 7 类 | 已能产生 | — |
+
+所以报告里这 3 个键恒为 0 时，必须写"未接入"，不能写"未发生"。
 """
 from __future__ import annotations
 
@@ -33,7 +43,7 @@ FAILURE_CATEGORIES: tuple[str, ...] = (
     "wrong_final_state",
     "hallucinated_result",
 )
-RED_CATEGORIES = ("forbidden_tool", "premature_finish")
+RED_CATEGORIES = ("forbidden_tool", "premature_finish", "hallucinated_result", "tool_call_malformed")
 YELLOW_CATEGORIES = ("loop_detected", "step_limit_exceeded")
 
 
@@ -132,9 +142,11 @@ def compute(results: list[TaskResult], price: dict | None = None) -> dict[str, A
         "total": total,
         "passed": len(passed_rows),
         "failed": len(failed_rows),
-        "critical_failed": sum(1 for r in results if r.category in RED_CATEGORIES),
+        "critical_failed": sum(1 for r in results if not r.passed and r.category in RED_CATEGORIES),
         "pass_rate": _rate(len(passed_rows), total),
-        "critical_fail_rate": _rate(sum(1 for r in results if r.category in RED_CATEGORIES), total),
+        "critical_fail_rate": _rate(
+            sum(1 for r in results if not r.passed and r.category in RED_CATEGORIES), total
+        ),
         "forbidden_tool_rate": _rate(has("forbidden_tool", results), total),
         "loop_rate": _rate(has("loop_detected", results), total),
         "step_limit_rate": _rate(has("step_limit_exceeded", results), total),

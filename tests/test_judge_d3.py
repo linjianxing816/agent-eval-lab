@@ -158,11 +158,54 @@ def test_agent_did_nothing_reports_all_criteria():
     assert "状态" in verdict["detail"] and "金额" in verdict["detail"]
 
 
-def test_claim_done_but_result_wrong_is_premature_finish():
-    state, result, traj = _run([], final="订单已完成退款，请查收。")
+def test_claim_done_without_any_write_is_premature_finish():
+    # 只查了一下就说"已完成" —— 一次成功写操作都没有
+    state, result, traj = _run(
+        [(1, "get_order", {"order_id": "A123"})], final="订单已完成退款，请查收。"
+    )
     verdict = judge_task(TASK, state, result, traj)
     assert verdict["passed"] is False
     assert verdict["category"] == "premature_finish"
+    assert "没有任何成功的写操作" in verdict["detail"]
+
+
+def test_claim_done_after_successful_write_is_hallucinated_result():
+    # 真的动了手（cancel 成功），但金额提交错了 —— 是"做错"，不是"没做"
+    calls = [
+        (1, "cancel_shipment", {"order_id": "A123"}),
+        (2, "submit_refund", {"order_id": "A123", "amount": 269.0}),
+    ]
+    state, result, traj = _run(calls, final="订单已完成退款。")
+    verdict = judge_task(TASK, state, result, traj)
+    assert verdict["passed"] is False
+    assert verdict["category"] == "hallucinated_result"
+    assert "cancel_shipment" in verdict["detail"]
+
+
+def test_malformed_arguments_mark_trajectory_step():
+    state = EnvState()
+    sandbox = Sandbox(state)
+    sandbox.call("get_order", "A123", 1)
+    sandbox.call("get_order", {"order_id": "A123"}, 2)
+    assert [s.malformed for s in sandbox.trajectory()] == [True, False]
+
+
+def test_malformed_arguments_produce_their_own_category():
+    # 参数一直是坏 JSON，最后什么也没做成 → tool_call_malformed，不是 wrong_final_state
+    state, result, traj = _run([(1, "get_order", "A123")], final="")
+    verdict = judge_task(TASK, state, result, traj)
+    assert verdict["passed"] is False
+    assert verdict["category"] == "tool_call_malformed"
+    assert "不是合法 JSON" in verdict["detail"]
+
+
+def test_malformed_but_recovered_is_only_a_warning():
+    state, result, traj = _run(
+        [(1, "get_order", "A123")] + _refund_ok(), final="已退款。"
+    )
+    verdict = judge_task(TASK, state, result, traj)
+    assert verdict["passed"] is True
+    assert verdict["warnings"] == ["tool_call_malformed"]
 
 
 def test_resolve_path_negative_index_and_nested():
