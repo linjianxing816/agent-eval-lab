@@ -34,6 +34,8 @@ class TrajectoryStep:
     result: dict
     elapsed_ms: float
     error: str | None    # 只在「工具内部抛异常」时非空，业务失败留 None
+    repeated: bool = False   # 被判「循环」的那一条。第 3 次同参调用照常执行，但要标出来，
+                             # 否则 D3 看到 3 条一样的轨迹，不知道哪条是触发点
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -65,7 +67,7 @@ class Sandbox:
     def clear_trajectory(self) -> None:
         self._steps.clear()
 
-    def call(self, name: str, args: Any, step: int) -> dict:
+    def call(self, name: str, args: Any, step: int, repeated: bool = False) -> dict:
         """执行一次工具调用。永远返回 dict，不抛异常。"""
         started = time.perf_counter()
         result, error = self._execute(name, args)
@@ -78,6 +80,7 @@ class Sandbox:
                 result=copy.deepcopy(result),
                 elapsed_ms=elapsed_ms,
                 error=error,
+                repeated=repeated,
             )
         )
         return result
