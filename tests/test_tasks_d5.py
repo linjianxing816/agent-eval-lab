@@ -115,6 +115,15 @@ def test_int_expectation_is_warning():
     assert issues[0].level == "warning"
 
 
+def test_string_expectation_is_error():
+    # 手滑加引号："299" 和 299.0 永远不相等，这条任务写下去就是死的
+    task = dict(GOOD, success_criteria=[{"path": "orders.A123.amount", "expect": "299"}])
+    issues = validate_task(task, 1, {})
+    assert [i.code for i in issues] == ["E13"]
+    assert issues[0].level == "error"
+    assert "永远失败" in issues[0].message
+
+
 def test_check_file_reports_many_issues_at_once(tmp_path):
     rows = [
         json.dumps(GOOD, ensure_ascii=False),

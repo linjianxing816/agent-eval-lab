@@ -41,6 +41,19 @@ DEFAULT_INITIAL_STATE: dict[str, Any] = {
     },
 }
 
+# 上面那个 dict 的**结构描述**，给任务校验器用（`evalkit/tasks.py`）。
+# 为什么不从 DEFAULT_INITIAL_STATE 推：refunds 初始是空列表，推不出元素长什么样；
+# 而 `refunds[-1].amount` 恰恰是任务里最常写的路径。
+# 为什么放在这个文件：**改上面就要改下面**，同一个文件里眼睛能看到。
+# 跨文件的话，加字段时一定有人只改一处，而测试是绿的（两边都没加，比不出差异）。
+STATE_SCHEMA: dict[str, Any] = {
+    "users": {"*": {"name": str, "vip": bool}},          # "*" = 任意用户 ID
+    "orders": {"*": {"user": str, "amount": float, "status": str}},
+    "refunds": [{"order_id": str, "amount": float, "ts": str}],   # 列表：只写元素结构
+    "policy": {"shipped_requires_cancel": bool, "vip_full_refund": bool, "non_vip_refund_ratio": float},
+    "clock": str,
+}
+
 
 class EnvState:
     """一个任务的环境状态。构造即就绪，reset() 回到构造时的样子。"""

@@ -14,13 +14,15 @@
 | E06 | error | `forbid_tools` 含不存在的工具 |
 | E07 | error | `max_steps` 不是正整数 |
 | E08 | error | JSON 行解析失败 |
-| E09 | **warning** | 期望值和实际类型不匹配（期望 int，实际 float） |
+| E09 | **warning** | 期望值和实际类型不匹配但无害（期望 int，实际 float） |
 | E10 | error | 同一工具既在 `tools_allowed` 又在 `forbid_tools` |
 | E11 | **warning** | `tools_allowed` 是空列表（可能故意的，报出来让人确认） |
 | E12 | error | `instruction` 为空或超过 500 字 |
+| E13 | error | 期望值和实际类型根本不同（期望 `"299"` 字符串，实际 `299.0`）——这条任务永远失败 |
 
 E09 和 E11 是 warning 不是 error：E09 在我们的比较器下不会导致失败（数值统一 round 后
 比较，`299 == 299.0`），但写法不严谨；E11 可能是故意的（测"无工具可用"）。
+**E13 是 error**：字符串和数字永远不相等，任务写下去就是死的。
 **warning 不挡提交，但一定要看见。**
 
 【路径怎么校验：靠 schema，不靠实例】
@@ -28,7 +30,8 @@ E09 和 E11 是 warning 不是 error：E09 在我们的比较器下不会导致�
 如果只按初始状态解析，所有引用 `refunds[-1]` 的任务都会被误报——一个老是误报的检查器，
 人就不看了。
 
-所以用 `STATE_SCHEMA` 描述 mock 环境的**结构**：
+所以用 `STATE_SCHEMA`（定义在 `evalkit/env/state.py`，紧挨着 `DEFAULT_INITIAL_STATE`）
+描述 mock 环境的**结构**：
 - `orders` / `users` 是"任意 key → 固定字段"的字典，用 `"*"` 通配
 - `refunds` 是列表，元素结构固定为 `{order_id, amount, ts}`
 
@@ -43,22 +46,13 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from evalkit.env.state import DEFAULT_INITIAL_STATE
+from evalkit.env.state import DEFAULT_INITIAL_STATE, STATE_SCHEMA
 from evalkit.env.tools import TOOL_NAMES
 from evalkit.judge.outcome import split_path
 
 REQUIRED_FIELDS = ("id", "instruction", "tools_allowed", "success_criteria")
 MAX_INSTRUCTION_CHARS = 500
 DEFAULT_MAX_STEPS = 12
-
-# mock 环境的结构描述。列表只写一个元素（元素结构），字典用 "*" 表示"任意 key"。
-STATE_SCHEMA: dict[str, Any] = {
-    "users": {"*": {"name": str, "vip": bool}},
-    "orders": {"*": {"user": str, "amount": float, "status": str}},
-    "refunds": [{"order_id": str, "amount": float, "ts": str}],
-    "policy": {"shipped_requires_cancel": bool, "vip_full_refund": bool, "non_vip_refund_ratio": float},
-    "clock": str,
-}
 
 MISSING = object()
 
@@ -204,17 +198,24 @@ def _check_criterion(item: dict, index: int, state: dict, line: int, task_id: st
         return out                      # 合法但运行时才出现，类型无从比对
     if isinstance(expected, bool) or isinstance(actual, bool):
         return out
-    if isinstance(expected, int) and isinstance(actual, float):
+    expected_numeric = isinstance(expected, (int, float))
+    actual_numeric = isinstance(actual, (int, float))
+    if expected_numeric and actual_numeric:
+        if type(expected) is not type(actual):
+            out.append(Issue(
+                line, task_id, "E09", "warning",
+                "success_criteria[{0}] 路径 {1} 期望 {2}，实际状态是 {3}（无害，建议金额统一写小数）".format(
+                    index, path, type(expected).__name__, type(actual).__name__
+                ),
+            ))
+        return out
+    if type(expected) is not type(actual):
+        # 字符串和数字永远不相等 → 这条任务写下去就是死的
         out.append(Issue(
-            line, task_id, "E09", "warning",
-            "success_criteria[{0}] 路径 {1} 期望 int，实际状态是 float（建议写 {2}.0）".format(
-                index, path, expected
+            line, task_id, "E13", "error",
+            "success_criteria[{0}] 路径 {1} 期望 {2}（{3!r}），实际状态是 {4}（{5!r}），这条任务永远失败".format(
+                index, path, type(expected).__name__, expected, type(actual).__name__, actual
             ),
-        ))
-    elif isinstance(expected, float) and isinstance(actual, int):
-        out.append(Issue(
-            line, task_id, "E09", "warning",
-            "success_criteria[{0}] 路径 {1} 期望 float，实际状态是 int".format(index, path),
         ))
     return out
 
