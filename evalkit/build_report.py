@@ -53,8 +53,8 @@ def build_diff() -> dict[str, Any]:
     auto = sample_tasks(load_tasks("tasks/gen_s2.jsonl"), seed=2024)
     sets = {
         "人工集(42)": {"tasks": human,
-                       "strong": load_outcomes(RESULTS / "d13_human_strong.jsonl"),
-                       "weak": load_outcomes(RESULTS / "d13_human_weak.jsonl")},
+                       "strong": load_outcomes(RESULTS / "d13b_human_strong.jsonl"),
+                       "weak": load_outcomes(RESULTS / "d13b_human_weak.jsonl")},
         "自动集(30 抽样)": {"tasks": auto,
                             "strong": load_outcomes(RESULTS / "d13_auto_strong.jsonl"),
                             "weak": load_outcomes(RESULTS / "d13_auto_weak.jsonl")},
@@ -80,7 +80,9 @@ def build_trajectories() -> list[dict[str, Any]]:
     rows: list[dict[str, Any]] = []
     for tag, label in (("human", "人工集"), ("auto", "自动集")):
         for agent in ("strong", "weak"):
-            path = RESULTS / "d13_{0}_{1}.jsonl".format(tag, agent)
+            # 人工集用 d13b（2026-10-24 修完 5 条坏题后重跑）；自动集仍是 d13
+            prefix = "d13b" if tag == "human" else "d13"
+            path = RESULTS / "{0}_{1}_{2}.jsonl".format(prefix, tag, agent)
             if not path.exists():
                 continue
             for outcome in load_outcomes(path):

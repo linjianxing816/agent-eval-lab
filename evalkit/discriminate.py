@@ -30,6 +30,7 @@ from evalkit.client import ChatError, ModelClient
 from evalkit.env.sandbox import Sandbox
 from evalkit.env.state import EnvState
 from evalkit.env.tools import TOOL_SCHEMAS
+from evalkit.gate import gap_threshold
 from evalkit.judge import judge_task
 
 def _without(tool_name: str) -> list[dict]:
@@ -271,14 +272,19 @@ def compare_by_type(strong: list[Outcome], weak: list[Outcome],
         s_rate, s_n = rate(strong, bucket)
         w_rate, w_n = rate(weak, bucket)
         gap = round(s_rate - w_rate, 4) if bucket == "要做事" else round(w_rate - s_rate, 4)
-        if bucket == "要做事":
-            direction = "弱 Agent 做不成事" if gap > 0 else "弱 Agent 反而更强"
+        # 门槛按观测数算（2 倍标准误）。|gap| 落在门槛内就是噪声，不能说"方向反了"——
+        # 实测人工集要做事组 22 个观测、误差 ±0.21，-0.045 完全在噪声里。
+        threshold = gap_threshold(s_n)
+        if abs(gap) < threshold:
+            direction = "差异在噪声内（未测出区分度，门槛 {0:.3f}）".format(threshold)
+        elif bucket == "要做事":
+            direction = "弱 Agent 做不成事"
         else:
-            direction = "弱 Agent 更保守（不该动却动得更少）" if gap > 0 else "弱 Agent 更容易乱动"
+            direction = "弱 Agent 更保守（不该动却动得更少）"
         report[bucket] = {
             "strong": s_rate, "weak": w_rate, "gap": gap,
             "runs": s_n, "tasks": len({r.task_id for r in strong if kind.get(r.task_id) == bucket}),
-            "direction": direction,
+            "threshold": threshold, "direction": direction,
         }
     return report
 

@@ -158,3 +158,19 @@ def test_cost_of_loads_dotenv_from_file(tmp_path):
     result = cost_of({"runs": 1, "input": 1_000_000, "output": 1_000_000}, env_path=env_file)
     assert result is not None
     assert result["input_cost"] == 2.0 and result["output_cost"] == 9.0
+
+
+def test_small_gap_inside_noise_is_not_reported_as_direction():
+    # 人工集要做事组 22 个观测、门槛 0.213，-0.045 完全在噪声里，不能说"方向反了"
+    from evalkit.discriminate import compare_by_type
+    tasks = [{"id": "task-0{0:02d}".format(i), "scenario": "正常"} for i in range(1, 23)]
+    strong = [Outcome(t["id"], "strong", 0, True, i % 2 == 0, None, 3, 10, 1) for i, t in enumerate(tasks)]
+    weak = [Outcome(t["id"], "weak", 0, True, i % 2 == 0, None, 3, 10, 1) for i, t in enumerate(tasks)]
+    # 只让一条不同 → gap 约 0.045，远小于门槛
+    weak[0] = Outcome(tasks[0]["id"], "weak", 0, True, not strong[0].passed, None, 3, 10, 1)
+    report = compare_by_type(strong, weak, tasks)
+    row = report["要做事"]
+    assert row["runs"] == 22
+    assert row["threshold"] == 0.213
+    assert abs(row["gap"]) < row["threshold"]
+    assert "噪声" in row["direction"]
