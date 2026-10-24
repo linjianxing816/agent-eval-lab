@@ -44,8 +44,8 @@ def test_weak_agent_only_lacks_get_order():
     assert WEAK_AGENT["system_prompt"] == STRONG_AGENT["system_prompt"]
 
 
-def test_agents_registry_has_both():
-    assert set(AGENTS) == {"strong", "weak"}
+def test_agents_registry_has_all_four():
+    assert set(AGENTS) == {"strong", "weak", "weak_no_calc", "weak_no_user"}
 
 
 def test_run_batch_collects_outcomes():
@@ -92,3 +92,13 @@ def test_compare_reports_gap():
     report = compare({"set": {"strong": strong, "weak": weak}})
     assert report["set"]["gap"] == 1.0
     assert report["set"]["effective_tasks"] == 1
+
+
+def test_round3_weakenings_each_remove_one_tool():
+    from evalkit.discriminate import WEAK_NO_CALC, WEAK_NO_USER
+    strong_tools = {t["function"]["name"] for t in STRONG_AGENT["tools"]}
+    assert strong_tools - {t["function"]["name"] for t in WEAK_NO_CALC["tools"]} == {"calc_refund"}
+    assert strong_tools - {t["function"]["name"] for t in WEAK_NO_USER["tools"]} == {"get_user"}
+    # 只改一处：prompt 都不动
+    assert WEAK_NO_CALC["system_prompt"] == STRONG_AGENT["system_prompt"]
+    assert WEAK_NO_USER["system_prompt"] == STRONG_AGENT["system_prompt"]

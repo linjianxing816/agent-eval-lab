@@ -32,13 +32,33 @@ from evalkit.env.state import EnvState
 from evalkit.env.tools import TOOL_SCHEMAS
 from evalkit.judge import judge_task
 
-WEAK_TOOLS = [t for t in TOOL_SCHEMAS if t["function"]["name"] != "get_order"]
-WEAK_AGENT: dict[str, Any] = {
-    "name": "weak",
-    "system_prompt": SYSTEM_PROMPT,      # 一个字不改，只少一个工具
-    "tools": WEAK_TOOLS,
+def _without(tool_name: str) -> list[dict]:
+    return [t for t in TOOL_SCHEMAS if t["function"]["name"] != tool_name]
+
+
+WEAK_AGENT: dict[str, Any] = {          # 第 1/2 轮用的：删 get_order
+    "name": "weak_no_order",
+    "system_prompt": SYSTEM_PROMPT,
+    "tools": _without("get_order"),
 }
-AGENTS = {"strong": STRONG_AGENT, "weak": WEAK_AGENT}
+# 第 3 轮的两个候选。删 get_order 绕得过去，因为 calc_refund 是 oracle
+# （返回 refund_amount + basis），所以这轮直接打 oracle 和 VIP 信息来源。
+WEAK_NO_CALC: dict[str, Any] = {
+    "name": "weak_no_calc",
+    "system_prompt": SYSTEM_PROMPT,
+    "tools": _without("calc_refund"),
+}
+WEAK_NO_USER: dict[str, Any] = {
+    "name": "weak_no_user",
+    "system_prompt": SYSTEM_PROMPT,
+    "tools": _without("get_user"),
+}
+AGENTS = {
+    "strong": STRONG_AGENT,
+    "weak": WEAK_AGENT,
+    "weak_no_calc": WEAK_NO_CALC,
+    "weak_no_user": WEAK_NO_USER,
+}
 
 
 @dataclass(frozen=True)
