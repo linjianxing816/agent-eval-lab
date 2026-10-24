@@ -122,3 +122,36 @@ def test_schemas_and_registry_are_consistent():
     schema_names = [item["function"]["name"] for item in TOOL_SCHEMAS]
     assert sorted(schema_names) == sorted(TOOL_NAMES)
     assert sorted(TOOL_REGISTRY) == sorted(TOOL_NAMES)
+
+
+def test_partial_initial_state_is_deep_merged():
+    # 任务只写 A123，别的字段必须还在——否则 get_user 查不到人、submit_refund 读不到 policy
+    state = EnvState({"orders": {"A123": {"user": "U1001", "amount": 299.0, "status": "refunded"}}})
+    assert state.data["orders"]["A123"]["status"] == "refunded"
+    assert state.data["orders"]["B456"]["status"] == "shipped"
+    assert state.data["users"]["U1001"]["vip"] is True
+    assert state.data["users"]["U1002"]["vip"] is False
+    assert state.data["policy"]["non_vip_refund_ratio"] == 0.9
+    assert state.data["clock"] == "2026-01-01T00:00:00Z"
+    assert state.data["refunds"] == []
+
+
+def test_initial_state_list_replaces_not_merges():
+    record = {"order_id": "A123", "amount": 299.0, "ts": "2026-01-01T00:00:00Z"}
+    state = EnvState({"refunds": [record]})
+    assert state.data["refunds"] == [record]
+
+
+def test_reset_after_merge_returns_to_task_initial():
+    state = EnvState({"orders": {"A123": {"user": "U1001", "amount": 299.0, "status": "refunded"}}})
+    cancel_shipment(state, "B456")
+    assert state.data["orders"]["B456"]["status"] == "cancelled"
+    state.reset()
+    assert state.data["orders"]["B456"]["status"] == "shipped"
+    assert state.data["orders"]["A123"]["status"] == "refunded"     # 回到合并后的初始，不是默认
+
+
+def test_new_order_in_initial_state():
+    state = EnvState({"orders": {"C001": {"user": "U1001", "amount": 0.01, "status": "shipped"}}})
+    assert state.data["orders"]["C001"]["amount"] == 0.01
+    assert state.data["orders"]["A123"]["status"] == "shipped"

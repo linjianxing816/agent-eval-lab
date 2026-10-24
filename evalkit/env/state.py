@@ -55,15 +55,49 @@ STATE_SCHEMA: dict[str, Any] = {
 }
 
 
+def build_initial(override: dict | None = None) -> dict:
+    """默认状态 + 任务覆盖。
+
+    **dict 递归合并，list 直接替换**——任务里的 `initial_state` 只写要改的部分：
+    - `{"orders": {"A123": {...}}}` → 只改 A123，B456 保留
+    - `{"refunds": [...]}` → 整份替换（列表没法"按 key 合并"）
+    - 没写的字段（users / policy / clock）保留默认值
+
+    不合并的话，任务里写一个 A123 就会把 users / policy / clock 全丢掉，
+    get_user 查不到人、submit_refund 读 policy 直接 KeyError。
+    """
+    merged = copy.deepcopy(DEFAULT_INITIAL_STATE)
+    if not override:
+        return merged
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = _deep_merge(merged[key], value)
+        else:
+            merged[key] = copy.deepcopy(value)
+    return merged
+
+
+def _deep_merge(base: dict, override: dict) -> dict:
+    result = copy.deepcopy(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(result.get(key), dict):
+            result[key] = _deep_merge(result[key], value)
+        else:
+            result[key] = copy.deepcopy(value)
+    return result
+
+
 class EnvState:
-    """一个任务的环境状态。构造即就绪，reset() 回到构造时的样子。"""
+    """一个任务的环境状态。构造即就绪，reset() 回到构造时的样子。
+
+    `initial` 是**覆盖**，不是整份替换——见 `build_initial()`。
+    """
 
     def __init__(self, initial: dict | None = None) -> None:
-        source = DEFAULT_INITIAL_STATE if initial is None else initial
         # 模板深拷贝两份：一份留作 reset 的基准，一份给工具去改。
         # 不拷贝的话，工具改了 _data 就等于改了 DEFAULT_INITIAL_STATE，
         # 下一个任务直接继承上一个任务的脏状态。
-        self._initial: dict[str, Any] = copy.deepcopy(source)
+        self._initial: dict[str, Any] = build_initial(initial)
         self._data: dict[str, Any] = copy.deepcopy(self._initial)
 
     @property

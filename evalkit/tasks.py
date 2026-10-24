@@ -46,7 +46,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from evalkit.env.state import DEFAULT_INITIAL_STATE, STATE_SCHEMA
+from evalkit.env.state import STATE_SCHEMA, build_initial
 from evalkit.env.tools import TOOL_NAMES
 from evalkit.judge.outcome import split_path
 
@@ -172,15 +172,9 @@ def validate_task(task: dict, line: int, seen_ids: dict[str, int]) -> list[Issue
 
 
 def _merged_state(task: dict) -> dict:
-    """任务自己的 initial_state 覆盖到默认状态上（和运行时一致）。"""
-    state = json.loads(json.dumps(DEFAULT_INITIAL_STATE, ensure_ascii=False))
-    initial = task.get("initial_state") or {}
-    for key, value in initial.items():
-        if isinstance(value, dict) and isinstance(state.get(key), dict):
-            state[key].update(value)
-        else:
-            state[key] = value
-    return state
+    """任务自己的 initial_state 覆盖到默认状态上——**和运行时用同一个函数**，
+    不然校验器说"路径没问题"、跑起来却 KeyError。"""
+    return build_initial(task.get("initial_state") or {})
 
 
 def _check_criterion(item: dict, index: int, state: dict, line: int, task_id: str) -> list[Issue]:
