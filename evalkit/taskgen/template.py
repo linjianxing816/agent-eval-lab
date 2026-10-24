@@ -50,10 +50,7 @@ PROMPT_TEMPLATE = """你是一个 Agent 评测任务的设计助手。请按下�
 ## 场景说明
 [[SCENARIO]]
 
-## 本次可用的实体（只能从这里选，不许编新的订单号或用户 ID）
-用户：
-[[USERS]]
-订单：
+## 本次可用的实体（第 i 组只能用于第 i 条任务，不要跨组混用）
 [[ORDERS]]
 
 ## 硬性规则
@@ -69,7 +66,7 @@ PROMPT_TEMPLATE = """你是一个 Agent 评测任务的设计助手。请按下�
                                  不要写条数（0 / 1 / 2）——条数只能查数量，查不出退了哪笔、多少钱
    users.<用户ID>.vip          → expect 是 true / false
 5. 金额一律写小数：299.0 不写 299；不要写成字符串 "299"（校验器会报 E13）
-6. instruction 用中文口语，40 字以内；不要写"必须先取消发货"这类规则提示
+6. instruction 用中文口语，**20 字以内**（硬上限 40，但尽量 20 字内，人工集的平均长度是 14.7 字）；不要写"必须先取消发货"这类规则提示
 7. 只要用到了新订单号，就必须在同一条任务的 initial_state 里定义它，
    user / amount / status 三个字段都要写全，否则校验器报 E03
 8. 不许在 instruction 里泄露答案：不写"已经退过款了"、不写"先取消再退款"、
@@ -77,7 +74,9 @@ PROMPT_TEMPLATE = """你是一个 Agent 评测任务的设计助手。请按下�
 9. 每条 instruction 的句式必须不同。不许重复使用同一个开头
    （比如全是"这单我不想要了"），换着说：能不能帮我退一下 / 这单有问题 /
    客户催着要退款 / 这个订单怎么处理
-10. [[GROUP_RULE]]
+10. 每条任务的 success_criteria **最多 3 条**（超过 3 条会被丢弃）。
+    一条任务只针对自己那组实体，不要把所有实体都写进断言
+11. [[GROUP_RULE]]
 
 [[AVOID]]
 ## 正例
@@ -139,30 +138,51 @@ def read_scenarios(path: Path | None = None) -> dict[str, Scenario]:
     return {name: sc for name, sc in result.items() if name in GROUP_RULES}
 
 
-def make_entities(group: str, count: int, rng: random.Random, start: int = 1) -> list[Entity]:
-    """按类别造实体。订单号从 F{start:03d} 递增，金额从清单抽，用户随机 VIP/非 VIP。"""
-    entities: list[Entity] = []
-    for offset in range(count):
-        order_id = "F{0:03d}".format(start + offset)
+def make_entity_sets(group: str, n_tasks: int, rng: random.Random,
+                     start: int = 1) -> list[list[Entity]]:
+    """**按任务分配实体**，不是按块共享。
+
+    一块给 10 个实体的话，模型会把 10 个全写进断言——那测的是"批量查询能力"，
+    不是"会不会瞎猜"。人工集 42 条每条只涉及 1–2 个订单，这里对齐：
+    - 正常 / 多步依赖 → 固定 2 个
+    - 其余四类 → 1 或 2 个随机
+    """
+    fixed = 2 if group in ("正常", "多步依赖") else None
+    sets: list[list[Entity]] = []
+    seq = start
+    for _ in range(n_tasks):
+        size = fixed or rng.choice((1, 2))
+        sets.append(_one_set(group, size, rng, seq, is_first=not sets))
+        seq += size
+    return sets
+
+
+def _one_set(group: str, size: int, rng: random.Random, seq: int, is_first: bool) -> list[Entity]:
+    out: list[Entity] = []
+    for offset in range(size):
+        order_id = "F{0:03d}".format(seq + offset)
         user_id, user_name, vip = rng.choice(USERS)
         amount = rng.choice(AMOUNTS)
         status = "shipped"
-        if group == "状态陷阱" and offset == 0:
+        # 状态陷阱：每组第一个订单预置成 cancelled/refunded
+        if group == "状态陷阱" and is_first and offset == 0:
             status = rng.choice(("cancelled", "refunded"))
-        entities.append(Entity(order_id, user_id, user_name, vip, amount, status))
-    return entities
+        out.append(Entity(order_id, user_id, user_name, vip, amount, status))
+    return out
 
 
-def build_prompt(scenario: Scenario, entities: list[Entity], n: int, id_prefix: str,
+def build_prompt(scenario: Scenario, entity_sets: list[list[Entity]], n: int, id_prefix: str,
                  avoid: list[str] | None = None) -> str:
     """组一条发给模型的完整 prompt。
 
-    `avoid` 是**已经生成过的 instruction**：规则 9 要求句式不重复，但模型看不到上一次调用
-    写了什么，跨类别就会撞车（实测第 4 条和第 5 条只差一个"你"字）。所以把已用的句式回传。
+    `entity_sets` 是**每条任务一组实体**：第 i 条任务只能用第 i 组，不许跨组混用。
+    `avoid` 是已经生成过的 instruction——规则 9 要求句式不重复，但模型看不到上一次调用
+    写了什么，跨类别就会撞车（实测第 4 条和第 5 条只差一个"你"字）。
     """
-    users = "\n".join(
-        "  {0} {1} {2}".format(uid, name, "VIP" if vip else "非 VIP") for uid, name, vip in USERS
-    )
+    order_lines = []
+    for index, group_entities in enumerate(entity_sets, 1):
+        joined = "；".join(e.order_line().strip() for e in group_entities)
+        order_lines.append("第 {0} 组（只用于第 {0} 条任务）：{1}".format(index, joined))
     avoid_block = ""
     if avoid:
         recent = avoid[-15:]
@@ -174,12 +194,11 @@ def build_prompt(scenario: Scenario, entities: list[Entity], n: int, id_prefix: 
         PROMPT_TEMPLATE
         .replace("[[N]]", str(n))
         .replace("[[SCENARIO]]", scenario.text)
-        .replace("[[USERS]]", users)
-        .replace("[[ORDERS]]", "\n".join(e.order_line() for e in entities))
+        .replace("[[ORDERS]]", "\n".join(order_lines))
         .replace("[[ID_PREFIX]]", id_prefix)
         .replace("[[GROUP_RULE]]", GROUP_RULES[scenario.group])
         .replace("[[AVOID]]", avoid_block)
-        .replace("[[EXAMPLES]]", _examples_for(entities))
+        .replace("[[EXAMPLES]]", _examples_for(entity_sets[0]))
     )
 
 

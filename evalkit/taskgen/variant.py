@@ -24,7 +24,7 @@ from evalkit.taskgen.template import (
     Entity,
     Scenario,
     build_prompt,
-    make_entities,
+    make_entity_sets,
     read_scenarios,
 )
 
@@ -85,6 +85,10 @@ def check_structure(task: dict, group: str) -> str | None:
     criteria = task.get("success_criteria") or []
     if not isinstance(criteria, list) or not criteria:
         return "success_criteria 为空"
+    # 一条任务最多 4 条断言。人工集 max 4；断言多的任务天然更难判，
+    # 自动集如果普遍多写，D12 会得出"自动集更难"的假结论。
+    if len(criteria) > 4:
+        return "success_criteria 有 {0} 条，超过上限 4".format(len(criteria))
     statuses = initial_statuses(task)
     forbid = (task.get("constraints") or {}).get("forbid_tools") or []
 
@@ -95,6 +99,13 @@ def check_structure(task: dict, group: str) -> str | None:
         if str(item.get("path", "")).strip().endswith("refunds"):
             if not isinstance(item.get("expect"), list):
                 return "refunds 断言必须写列表，不许写条数"
+
+    # 所有类别通用：金额必须是"这个用户实际该退的数"（VIP 全额 / 非 VIP 九折）。
+    # 只查"金额在允许清单里"抓不住——非 VIP 订单写全额，299.0 本身就在清单里，
+    # 但那条任务无解：Agent 按规则退 269.1，永远判失败。
+    wrong_amount = _wrong_amount(task)
+    if wrong_amount:
+        return wrong_amount
 
     def status_asserts() -> list[tuple[str, str]]:
         out = []
@@ -151,6 +162,35 @@ def check_structure(task: dict, group: str) -> str | None:
     return None
 
 
+def _wrong_amount(task: dict) -> str | None:
+    """金额断言和用户身份对不上 → 返回原因。
+
+    实测踩到：非 VIP 订单断言全额 299.0，Agent 按规则退 269.1，永远判失败。
+    只校验"金额在允许清单里"抓不住这种——299.0 本身就在清单里。
+    """
+    state = build_initial(task.get("initial_state") or {})
+    users, orders = state["users"], state["orders"]
+    mine = list((task.get("initial_state") or {}).get("orders") or {})
+    for item in task.get("success_criteria") or []:
+        if not str(item.get("path", "")).endswith(".amount"):
+            continue
+        expect = item.get("expect")
+        if not isinstance(expect, (int, float)) or isinstance(expect, bool):
+            continue
+        if len(mine) != 1:
+            continue
+        order = orders.get(mine[0])
+        if not order:
+            continue
+        user = users.get(order.get("user")) or {}
+        correct = float(order["amount"]) if user.get("vip") else float(order["amount"]) * 0.9
+        if round(float(expect), 2) != round(correct, 2):
+            return "金额断言 {0} 和订单 {1} 应退 {2:.2f} 不符（{3}）".format(
+                expect, mine[0], round(correct, 2), "VIP" if user.get("vip") else "非 VIP"
+            )
+    return None
+
+
 def generate(client: ModelClient, plan: dict[str, int], out_path: Path,
              scenarios: dict[str, Scenario] | None = None, seed: int = 7,
              known_instructions: list[str] | None = None, chunk_size: int = 10,
@@ -177,9 +217,9 @@ def generate(client: ModelClient, plan: dict[str, int], out_path: Path,
         while got < target and attempts < max_attempts:
             attempts += 1
             need = min(chunk_size, target - got)
-            entities = make_entities(group, max(need, 2), rng, start=order_seq)
-            order_seq += len(entities)
-            prompt = build_prompt(scenario, entities, need, "gen-s1-001",
+            entity_sets = make_entity_sets(group, need, rng, start=order_seq)
+            order_seq += sum(len(s) for s in entity_sets)
+            prompt = build_prompt(scenario, entity_sets, need, "gen-s1-001",
                                   avoid=[t["instruction"] for t in accepted])
             reply = client.chat([{"role": "user", "content": prompt}], [])
             raw = reply.message.get("content") or ""
