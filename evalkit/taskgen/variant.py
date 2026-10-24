@@ -237,9 +237,10 @@ def generate(client: ModelClient, plan: dict[str, int], out_path: Path,
     book = scenarios if scenarios is not None else read_scenarios()
     seen = {normalize(text) for text in (known_instructions or [])}
     accepted: list[dict] = []
-    # Jaccard 只在**本次生成集内部**比，不和人工集比——
-    # 和人工集比会把"和人工集相似"的任务丢掉，D12 再比两套就失真了。
-    jaccard_pool: list[tuple[str, set[str]]] = []
+    # Jaccard 只在**本次生成集内部、且同一类别内**比。
+    # 不和人工集比：会把"像人工集"的任务丢掉，D12 再比两套就失真。
+    # 不跨类别比：状态陷阱和正常组文案可能一模一样，但测的是不同东西。
+    jaccard_pool: dict[str, list[tuple[str, set[str]]]] = {}
     stats = GenStats()
     order_seq = 1
     for group, target in plan.items():
@@ -277,13 +278,14 @@ def generate(client: ModelClient, plan: dict[str, int], out_path: Path,
                     stats.drop("duplicate", group, "归一化后完全相同", text)
                     continue
                 if jaccard_threshold is not None:
-                    score, hit = find_duplicate(text, jaccard_pool, jaccard_threshold)
+                    pool = jaccard_pool.setdefault(group, [])
+                    score, hit = find_duplicate(text, pool, jaccard_threshold)
                     if hit is not None:
                         stats.drop("duplicate", group,
                                    "Jaccard {0:.3f} 撞「{1}」".format(score, hit), text)
                         continue
                 seen.add(key)
-                jaccard_pool.append((text, shingles(text)))
+                jaccard_pool.setdefault(group, []).append((text, shingles(text)))
                 item["id"] = "gen-s1-{0:03d}".format(len(accepted) + 1)
                 accepted.append(item)
                 got += 1

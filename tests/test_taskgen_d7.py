@@ -142,3 +142,19 @@ def test_every_state_trap_task_gets_preset_order():
     sets = make_entity_sets("状态陷阱", 5, random.Random(3), start=1)
     for group in sets:
         assert group[0].status in ("cancelled", "refunded")
+
+
+def test_dedup_is_scoped_to_same_group():
+    # 跨类别不判重：状态陷阱和正常组文案可能一模一样，但测的是不同东西
+    texts = ["取消 A123 发货", "取消 A123 发货"]
+    same_group = audit_duplicates(texts, 0.85, groups=["正常", "正常"])
+    assert same_group["duplicate_count"] == 1
+
+    cross_group = audit_duplicates(texts, 0.85, groups=["状态陷阱", "正常"])
+    assert cross_group["duplicate_count"] == 0
+
+
+def test_audit_rejects_mismatched_groups():
+    import pytest
+    with pytest.raises(ValueError):
+        audit_duplicates(["a", "b"], 0.85, groups=["正常"])

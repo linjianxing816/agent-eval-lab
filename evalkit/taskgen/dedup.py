@@ -89,18 +89,29 @@ def top_pairs(instructions: list[str], limit: int = 5) -> list[tuple[float, str,
     return [(round(s, 4), x, y) for s, x, y in scored[:limit]]
 
 
-def audit_duplicates(instructions: list[str], threshold: float) -> dict:
+def audit_duplicates(instructions: list[str], threshold: float,
+                     groups: list[str] | None = None) -> dict:
     """事后审一份已存在的集合：如果当初就用这个阈值去重，会丢多少条。
 
     用来看 S1（已经生成完、当时没去重）的重复率。**同一把尺子量两份数据**，
     S1 和 S2 才可比。
+
+    **判重只在同一 group 内做**（传了 `groups` 的话）。跨类别不判重——
+    实测踩过：人工集 task-015（状态陷阱）和 task-034（正常）文案一模一样，
+    但一个测"已取消的单再取消"、一个测"正常单取消发货"，判重就是误判。
+    而自动集"换个订单号重说一遍"是同类别内的重复，照样该抓。
     """
-    pool: list[tuple[str, set[str]]] = []
+    if groups is not None and len(groups) != len(instructions):
+        raise ValueError("groups 和 instructions 长度不一致")
+    pools: dict[str, list[tuple[str, set[str]]]] = {}
     duplicates: list[dict] = []
-    for text in instructions:
+    for index, text in enumerate(instructions):
+        group = groups[index] if groups is not None else "*"
+        pool = pools.setdefault(group, [])
         score, hit = find_duplicate(text, pool, threshold)
         if hit is not None:
-            duplicates.append({"instruction": text, "similar_to": hit, "score": round(score, 4)})
+            duplicates.append({"instruction": text, "similar_to": hit,
+                               "score": round(score, 4), "group": group})
         else:
             pool.append((text, shingles(text)))
     total = len(instructions)
