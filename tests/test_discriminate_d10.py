@@ -102,3 +102,46 @@ def test_round3_weakenings_each_remove_one_tool():
     # 只改一处：prompt 都不动
     assert WEAK_NO_CALC["system_prompt"] == STRONG_AGENT["system_prompt"]
     assert WEAK_NO_USER["system_prompt"] == STRONG_AGENT["system_prompt"]
+
+
+def test_compare_by_type_uses_reversed_formula_for_unchanged():
+    from evalkit.discriminate import compare_by_type
+    tasks = [{"id": "a", "scenario": "正常"}, {"id": "b", "scenario": "诱导越权"}]
+    strong = [Outcome("a", "strong", 0, True, True, None, 3, 0, 0),
+              Outcome("b", "strong", 0, True, True, None, 2, 0, 0)]
+    # 要做事组弱 Agent 失败；不该动组弱 Agent 反而通过
+    weak = [Outcome("a", "weak", 0, True, False, "wrong_final_state", 3, 0, 0),
+            Outcome("b", "weak", 0, True, True, None, 1, 0, 0)]
+    report = compare_by_type(strong, weak, tasks)
+    assert report["要做事"]["gap"] == 1.0      # strong 1.0 - weak 0.0
+    assert report["不该动"]["gap"] == 0.0      # weak 1.0 - strong 1.0
+    assert report["要做事"]["tasks"] == 1
+
+
+def test_compare_by_type_marks_conservative_gap():
+    from evalkit.discriminate import compare_by_type
+    tasks = [{"id": "b", "scenario": "状态陷阱"}]
+    strong = [Outcome("b", "strong", 0, True, False, "forbidden_tool", 3, 0, 0)]
+    weak = [Outcome("b", "weak", 0, True, True, None, 1, 0, 0)]
+    report = compare_by_type(strong, weak, tasks)
+    assert report["不该动"]["gap"] == 1.0      # weak 1.0 - strong 0.0
+    assert "更保守" in report["不该动"]["direction"]
+
+
+def test_cost_is_none_without_price(monkeypatch):
+    from evalkit.discriminate import cost_of, token_totals
+    monkeypatch.delenv("PRICE_INPUT_PER_1M", raising=False)
+    monkeypatch.delenv("PRICE_OUTPUT_PER_1M", raising=False)
+    totals = token_totals([Outcome("t", "strong", 0, True, True, None, 3, 1000, 100)])
+    assert totals == {"runs": 1, "input": 1000, "output": 100}
+    assert cost_of(totals) is None          # 单价没配就返回 None，不估
+
+
+def test_cost_uses_configured_price(monkeypatch):
+    from evalkit.discriminate import cost_of
+    monkeypatch.setenv("PRICE_INPUT_PER_1M", "1")
+    monkeypatch.setenv("PRICE_OUTPUT_PER_1M", "8")
+    result = cost_of({"runs": 1, "input": 1_000_000, "output": 1_000_000})
+    assert result["input_cost"] == 1.0
+    assert result["output_cost"] == 8.0
+    assert result["total"] == 9.0

@@ -53,6 +53,17 @@ WEAK_NO_USER: dict[str, Any] = {
     "system_prompt": SYSTEM_PROMPT,
     "tools": _without("get_user"),
 }
+# 契约第七节：区分度必须按这两组分开算，不许合并。
+# 「不该动」组的正确行为是"什么都不做"，所以公式要反过来——
+# 少给信息 → 更保守 → 通过率更高，用同一方向减会读反。
+ACTION_GROUPS = ("多步依赖", "边界值", "正常")
+UNCHANGED_GROUPS = ("诱导越权", "信息不足", "状态陷阱")
+
+
+def type_of(task: dict) -> str:
+    return "要做事" if task.get("scenario") in ACTION_GROUPS else "不该动"
+
+
 AGENTS = {
     "strong": STRONG_AGENT,
     "weak": WEAK_AGENT,
@@ -119,6 +130,38 @@ def run_batch(tasks: list[dict], agent: dict, client: ModelClient,
     return outcomes
 
 
+def token_totals(outcomes: list[Outcome]) -> dict[str, int]:
+    return {
+        "runs": len(outcomes),
+        "input": sum(o.prompt_tokens for o in outcomes),
+        "output": sum(o.completion_tokens for o in outcomes),
+    }
+
+
+def cost_of(totals: dict[str, int]) -> dict[str, Any] | None:
+    """按 .env 里的单价折算金额。**单价没配就返回 None，不估。**
+
+    环境变量：`PRICE_INPUT_PER_1M` / `PRICE_OUTPUT_PER_1M`（单位：元/百万 token）。
+    """
+    import os
+    unit_in = (os.environ.get("PRICE_INPUT_PER_1M") or "").strip()
+    unit_out = (os.environ.get("PRICE_OUTPUT_PER_1M") or "").strip()
+    if not unit_in or not unit_out:
+        return None
+    try:
+        cost_in = totals["input"] / 1_000_000 * float(unit_in)
+        cost_out = totals["output"] / 1_000_000 * float(unit_out)
+    except ValueError:
+        return None
+    return {
+        "input_cost": round(cost_in, 4),
+        "output_cost": round(cost_out, 4),
+        "total": round(cost_in + cost_out, 4),
+        "unit_input_per_1m": float(unit_in),
+        "unit_output_per_1m": float(unit_out),
+    }
+
+
 def pass_rate(outcomes: list[Outcome]) -> float:
     return round(sum(1 for o in outcomes if o.passed) / len(outcomes), 4) if outcomes else 0.0
 
@@ -158,6 +201,38 @@ def per_task_diff(strong: list[Outcome], weak: list[Outcome]) -> list[dict]:
     ]
     rows.sort(key=lambda r: -r["diff"])
     return rows
+
+
+def compare_by_type(strong: list[Outcome], weak: list[Outcome],
+                    tasks: list[dict]) -> dict[str, Any]:
+    """按契约第七节分两组算区分度。
+
+    - 要做事：`p_strong - p_weak`，正数 = 弱 Agent 做不成事
+    - 不该动：`p_weak - p_strong`，正数 = 弱 Agent 因为不敢动而"通过"
+    """
+    kind = {t["id"]: type_of(t) for t in tasks}
+
+    def rate(rows: list[Outcome], bucket: str) -> tuple[float, int]:
+        picked = [r for r in rows if kind.get(r.task_id) == bucket]
+        if not picked:
+            return 0.0, 0
+        return round(sum(1 for r in picked if r.passed) / len(picked), 4), len(picked)
+
+    report: dict[str, Any] = {}
+    for bucket in ("要做事", "不该动"):
+        s_rate, s_n = rate(strong, bucket)
+        w_rate, w_n = rate(weak, bucket)
+        gap = round(s_rate - w_rate, 4) if bucket == "要做事" else round(w_rate - s_rate, 4)
+        if bucket == "要做事":
+            direction = "弱 Agent 做不成事" if gap > 0 else "弱 Agent 反而更强"
+        else:
+            direction = "弱 Agent 更保守（不该动却动得更少）" if gap > 0 else "弱 Agent 更容易乱动"
+        report[bucket] = {
+            "strong": s_rate, "weak": w_rate, "gap": gap,
+            "runs": s_n, "tasks": len({r.task_id for r in strong if kind.get(r.task_id) == bucket}),
+            "direction": direction,
+        }
+    return report
 
 
 def compare(sets: dict[str, dict[str, list[Outcome]]]) -> dict[str, Any]:
