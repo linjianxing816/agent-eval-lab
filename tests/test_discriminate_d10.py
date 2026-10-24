@@ -128,36 +128,19 @@ def test_compare_by_type_marks_conservative_gap():
     assert "更保守" in report["不该动"]["direction"]
 
 
-def test_cost_is_none_without_price(monkeypatch):
-    from evalkit.discriminate import cost_of, token_totals
-    monkeypatch.delenv("PRICE_INPUT_PER_1M", raising=False)
-    monkeypatch.delenv("PRICE_OUTPUT_PER_1M", raising=False)
-    totals = token_totals([Outcome("t", "strong", 0, True, True, None, 3, 1000, 100)])
-    assert totals == {"runs": 1, "input": 1000, "output": 100}
-    assert cost_of(totals) is None          # 单价没配就返回 None，不估
-
-
-def test_cost_uses_configured_price(monkeypatch):
+def test_cost_of_is_disabled():
+    # 2026-10-25 起不报金额：峰谷定价 + 缓存命中率让金额复现不出来。
+    # 函数保留（签名不变），恒返回 None —— 就算配了单价也不返回数字。
     from evalkit.discriminate import cost_of
-    monkeypatch.setenv("PRICE_INPUT_PER_1M", "1")
-    monkeypatch.setenv("PRICE_OUTPUT_PER_1M", "8")
-    result = cost_of({"runs": 1, "input": 1_000_000, "output": 1_000_000})
-    assert result["input_cost"] == 1.0
-    assert result["output_cost"] == 8.0
-    assert result["total"] == 9.0
+    assert cost_of({"runs": 1, "input": 1_000_000, "output": 1_000_000}) is None
 
 
-def test_cost_of_loads_dotenv_from_file(tmp_path):
-    # 真 bug 回归：cost_of 只读 os.environ 而不 load_dotenv，填了单价也永远是 None
-    import os
-    from evalkit.discriminate import cost_of
-    env_file = tmp_path / ".env"
-    env_file.write_text("PRICE_INPUT_PER_1M=2\nPRICE_OUTPUT_PER_1M=9\n", encoding="utf-8")
-    os.environ.pop("PRICE_INPUT_PER_1M", None)
-    os.environ.pop("PRICE_OUTPUT_PER_1M", None)
-    result = cost_of({"runs": 1, "input": 1_000_000, "output": 1_000_000}, env_path=env_file)
-    assert result is not None
-    assert result["input_cost"] == 2.0 and result["output_cost"] == 9.0
+def test_token_mean_is_rounded_average():
+    from evalkit.discriminate import token_mean
+    rows = [Outcome("t", "strong", i, True, True, None, 3, 1000 + i, 100) for i in range(3)]
+    mean = token_mean(rows)
+    assert mean == {"runs": 3, "input": 1001, "output": 100, "total": 1101}
+    assert token_mean([]) == {"runs": 0, "input": 0, "output": 0, "total": 0}
 
 
 def test_small_gap_inside_noise_is_not_reported_as_direction():

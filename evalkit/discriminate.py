@@ -182,33 +182,28 @@ def token_totals(outcomes: list[Outcome]) -> dict[str, int]:
     }
 
 
+def token_mean(outcomes: list[Outcome]) -> dict[str, int]:
+    """单任务 token 平均值，取整。报告只报这三个数（金额不报，见 cost_of）。"""
+    if not outcomes:
+        return {"runs": 0, "input": 0, "output": 0, "total": 0}
+    n = len(outcomes)
+    pin = sum(o.prompt_tokens for o in outcomes)
+    pout = sum(o.completion_tokens for o in outcomes)
+    return {"runs": n, "input": round(pin / n), "output": round(pout / n), "total": round((pin + pout) / n)}
+
+
 def cost_of(totals: dict[str, int], env_path: Path | None = None) -> dict[str, Any] | None:
-    """按 .env 里的单价折算金额。**单价没配就返回 None，不估。**
+    """**暂不使用 —— 恒返回 None。** 2026-10-25 起报告只报 token，不报金额。
 
-    环境变量：`PRICE_INPUT_PER_1M` / `PRICE_OUTPUT_PER_1M`（单位：元/百万 token）。
+    为什么不报金额：
+    1. **峰谷定价**：工作日 9-12 / 14-18 单价翻倍，同一批实验换个时段跑金额就不同
+    2. **缓存命中**：未命中约 3 元/百万，命中约 0.025 元/百万，差 100 倍以上，
+       而命中率取决于前面的调用顺序——同一任务跑两次都可能不一样
 
-    必须先 `load_env()`：只 import dotenv 不会把 .env 灌进 os.environ，
-    之前这里直接读 os.environ，用户填了单价也永远是 None。
+    所以金额**复现不出同一个数**，写进报告就是假精确。token 是精确的。
+    函数和参数保留，将来要算的时候把 body 恢复即可（见 git 历史）。
     """
-    import os
-    from evalkit.client import load_env
-    load_env(env_path)
-    unit_in = (os.environ.get("PRICE_INPUT_PER_1M") or "").strip()
-    unit_out = (os.environ.get("PRICE_OUTPUT_PER_1M") or "").strip()
-    if not unit_in or not unit_out:
-        return None
-    try:
-        cost_in = totals["input"] / 1_000_000 * float(unit_in)
-        cost_out = totals["output"] / 1_000_000 * float(unit_out)
-    except ValueError:
-        return None
-    return {
-        "input_cost": round(cost_in, 4),
-        "output_cost": round(cost_out, 4),
-        "total": round(cost_in + cost_out, 4),
-        "unit_input_per_1m": float(unit_in),
-        "unit_output_per_1m": float(unit_out),
-    }
+    return None
 
 
 def pass_rate(outcomes: list[Outcome]) -> float:

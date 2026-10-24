@@ -17,11 +17,13 @@ from typing import Any
 from evalkit.audit import load_tasks, sample_tasks
 from evalkit.diff import diff_sets, to_markdown
 from evalkit.discriminate import (
+    ACTION_GROUPS,
+    UNCHANGED_GROUPS,
     Outcome,
     compare_by_type,
-    cost_of,
+    group_of,
     summarize_agent,
-    token_totals,
+    token_mean,
     type_of,
 )
 from evalkit.gate import evaluate
@@ -75,54 +77,78 @@ def _badge(outcome: Outcome) -> str:
 
 
 def build_trajectories() -> list[dict[str, Any]]:
+    """轨迹查看器的数据。用**最新**日志（D15 要做事组 + D13 不该动组），
+    两批的 task_id 不重叠，不会重复。"""
     tasks = {t["id"]: t for t in load_tasks("tasks/human40.jsonl")}
-    tasks.update({t["id"]: t for t in sample_tasks(load_tasks("tasks/gen_s2.jsonl"), seed=2024)})
+    tasks.update({t["id"]: t for t in load_tasks("tasks/gen_s2.jsonl")})
+    sources = (
+        ("d15_human_strong.jsonl", "人工集", "strong"),
+        ("d15_human_weak.jsonl", "人工集", "weak"),
+        ("d15_auto_strong.jsonl", "自动集", "strong"),
+        ("d15_auto_weak.jsonl", "自动集", "weak"),
+        ("d13b_human_strong.jsonl", "人工集", "strong"),
+        ("d13b_human_weak.jsonl", "人工集", "weak"),
+        ("d13_auto_strong.jsonl", "自动集", "strong"),
+        ("d13_auto_weak.jsonl", "自动集", "weak"),
+    )
     rows: list[dict[str, Any]] = []
-    for tag, label in (("human", "人工集"), ("auto", "自动集")):
-        for agent in ("strong", "weak"):
-            # 人工集用 d13b（2026-10-24 修完 5 条坏题后重跑）；自动集仍是 d13
-            prefix = "d13b" if tag == "human" else "d13"
-            path = RESULTS / "{0}_{1}_{2}.jsonl".format(prefix, tag, agent)
-            if not path.exists():
+    seen: set[tuple[str, str, int]] = set()
+    for filename, label, agent in sources:
+        path = RESULTS / filename
+        if not path.exists():
+            continue
+        for outcome in load_outcomes(path):
+            task = tasks.get(outcome.task_id, {})
+            # D15 只跑了要做事组；D13 那两批只取不该动组，避免同一任务出现两次
+            if filename.startswith("d13") and group_of(task) not in UNCHANGED_GROUPS:
                 continue
-            for outcome in load_outcomes(path):
-                task = tasks.get(outcome.task_id, {})
-                forbid = set((task.get("constraints") or {}).get("forbid_tools") or [])
-                steps = [
-                    {
-                        "step": s["step"], "tool": s["tool"],
-                        "args": json.dumps(s["args"], ensure_ascii=False),
-                        "result": json.dumps(s["result"], ensure_ascii=False),
-                        "elapsed_ms": s["elapsed_ms"], "error": s["error"],
-                        "forbidden": s["tool"] in forbid,
-                    }
-                    for s in outcome.trajectory
-                ]
-                rows.append({
-                    "task_id": outcome.task_id,
-                    "agent": label + " / " + agent,
-                    "scenario": task.get("scenario") or "人工",
-                    "instruction": task.get("instruction", ""),
-                    "badge": _badge(outcome),
-                    "passed": outcome.passed,
-                    "steps": steps,
-                    "final_state": json.dumps(outcome.final_state or {}, ensure_ascii=False),
-                })
+            key = (outcome.task_id, agent, outcome.run)
+            if key in seen:
+                continue
+            seen.add(key)
+            forbid = set((task.get("constraints") or {}).get("forbid_tools") or [])
+            steps = [
+                {
+                    "step": s["step"], "tool": s["tool"],
+                    "args": json.dumps(s["args"], ensure_ascii=False),
+                    "result": json.dumps(s["result"], ensure_ascii=False),
+                    "elapsed_ms": s["elapsed_ms"], "error": s["error"],
+                    "forbidden": s["tool"] in forbid,
+                }
+                for s in outcome.trajectory
+            ]
+            rows.append({
+                "task_id": outcome.task_id,
+                "agent": label + " / " + agent + " · 第 " + str(outcome.run + 1) + " 次",
+                "scenario": group_of(task),
+                "instruction": task.get("instruction", ""),
+                "badge": _badge(outcome),
+                "passed": outcome.passed,
+                "steps": steps,
+                "final_state": json.dumps(outcome.final_state or {}, ensure_ascii=False),
+            })
     return rows
+
+
+def _task_rates(outcomes: list[Outcome]) -> dict[str, float]:
+    """每条任务的通过率。同一任务跑多次就取均值——扩样本后不能再假设 repeat=1。"""
+    grouped: dict[str, list[bool]] = {}
+    for o in outcomes:
+        grouped.setdefault(o.task_id, []).append(o.passed)
+    return {tid: sum(v) / len(v) for tid, v in grouped.items()}
 
 
 def build_distribution(strong: list[Outcome], weak: list[Outcome],
                        tasks: list[dict]) -> dict[str, Any]:
     kind = {t["id"]: type_of(t) for t in tasks}
-    s_map = {o.task_id: o.passed for o in strong}
-    w_map = {o.task_id: o.passed for o in weak}
+    s_map, w_map = _task_rates(strong), _task_rates(weak)
     buckets = [("0.0", 0.0), ("0.25", 0.25), ("0.5", 0.5), ("0.75", 0.75), ("1.0", 1.0)]
     counts = {b: {"要做事": 0, "不该动": 0} for b, _ in buckets}
     effective = 0
-    for tid, passed in s_map.items():
+    for tid, rate in s_map.items():
         if tid not in w_map:
             continue
-        diff = abs(float(passed) - float(w_map[tid]))
+        diff = abs(rate - w_map[tid])
         label = min(buckets, key=lambda b: abs(b[1] - diff))[0]
         counts[label][kind.get(tid, "要做事")] += 1
         if diff > 0:
@@ -134,69 +160,160 @@ def build_distribution(strong: list[Outcome], weak: list[Outcome],
                          "color": color})
     return {
         "buckets": rows,
-        "note": "{0}/{1} 条任务有效（区分度 > 0）。单任务数据来自 repeat=1，"
-                "误差约 ±1，只回答「多少条有效」，不用来看大小。".format(effective, len(s_map)),
+        "note": "{0}/{1} 条任务有效（区分度 > 0）。同一任务多次跑取通过率均值，"
+                "再看 strong 与 weak 的差。只回答「多少条有效」，不用来看大小。".format(
+                    effective, len(s_map)),
+    }
+
+
+def pick(outcomes: list[Outcome], tasks: list[dict], bucket: str) -> list[Outcome]:
+    """按任务类型筛执行记录。**扩样本只跑了要做事组，不该动组必须从旧日志里挑**，
+    不能把新旧两批混在一起算——那样同一任务会被计两次，N 和通过率都错。"""
+    groups = ACTION_GROUPS if bucket == "要做事" else UNCHANGED_GROUPS
+    ids = {t["id"] for t in tasks if group_of(t) in groups}
+    return [o for o in outcomes if o.task_id in ids]
+
+
+def build_instruction_following(tasks: list[dict], strong: list[Outcome],
+                                weak: list[Outcome]) -> dict[str, Any]:
+    """027 / 028 单独统计「指令遵循」。
+
+    这两条测的是"会不会按用户给的金额提交"，**不是业务正确**：
+    按规则退 299 是业务正确的，按指令退 100 才是指令正确。
+    混进"业务正确"读者会误读成"模型算错了"。
+    """
+    wanted = {"task-027", "task-028"}
+    by_id = {t["id"]: t for t in tasks if t["id"] in wanted}
+    rows: list[dict[str, Any]] = []
+    for tid in sorted(by_id):
+        task = by_id[tid]
+        expect = next((c["expect"] for c in task["success_criteria"]
+                       if str(c["path"]).endswith(".amount")), None)
+        for label, outcomes in (("strong", strong), ("weak", weak)):
+            mine = [o for o in outcomes if o.task_id == tid]
+            if not mine:
+                continue
+            amounts = []
+            for o in mine:
+                refunds = (o.final_state or {}).get("refunds") or []
+                amounts.append(round(float(refunds[-1]["amount"]), 2) if refunds else 0.0)
+            ok = all(abs(a - float(expect)) < 0.005 for a in amounts)
+            rows.append({
+                "task_id": tid, "agent": label, "instruction": task["instruction"],
+                "expect": float(expect),
+                "actual": " / ".join("{0:.2f}".format(a) for a in amounts),
+                "ok": ok,
+            })
+    return {
+        "rows": rows,
+        "note": "这一栏是「指令遵循」，不是「业务正确」：模型按规则自己算 299 属于业务正确、"
+                "但违反指令。两条任务的期望金额是用户明确给的 100 / 150。",
     }
 
 
 def main() -> None:
     diff = build_diff()
 
-    auto_tasks = sample_tasks(load_tasks("tasks/gen_s2.jsonl"), seed=2024)
-    auto_strong = load_outcomes(RESULTS / "d13_auto_strong.jsonl")
-    auto_weak = load_outcomes(RESULTS / "d13_auto_weak.jsonl")
-    by_type = compare_by_type(auto_strong, auto_weak, auto_tasks)
+    human_tasks = load_tasks("tasks/human40.jsonl")
+    # 用**全量** 100 条，不能用 30 条抽样：D15 跑的是 57 条要做事组，
+    # 拿抽样集去筛只会匹配到 16 条，N 直接腰斩、门槛被抬高。
+    auto_tasks = load_tasks("tasks/gen_s2.jsonl")
 
+    # D15 扩样本：只跑了要做事组（57 条 × 2 次 / 22 条 × 3 次）
+    d15 = {
+        "人工": {"strong": load_outcomes(RESULTS / "d15_human_strong.jsonl"),
+                 "weak": load_outcomes(RESULTS / "d15_human_weak.jsonl")},
+        "自动": {"strong": load_outcomes(RESULTS / "d15_auto_strong.jsonl"),
+                 "weak": load_outcomes(RESULTS / "d15_auto_weak.jsonl")},
+    }
+    # 不该动组没重跑，从 D13 全量日志里挑
+    old = {
+        "人工": {"strong": load_outcomes(RESULTS / "d13b_human_strong.jsonl"),
+                 "weak": load_outcomes(RESULTS / "d13b_human_weak.jsonl")},
+        "自动": {"strong": load_outcomes(RESULTS / "d13_auto_strong.jsonl"),
+                 "weak": load_outcomes(RESULTS / "d13_auto_weak.jsonl")},
+    }
+    tasks_of = {"人工": human_tasks, "自动": auto_tasks}
+    sources = {
+        ("人工", "要做事"): "D15 扩样本：22 条 × 3 次",
+        ("人工", "不该动"): "D13 全量：20 条 × 1 次",
+        ("自动", "要做事"): "D15 扩样本：57 条 × 2 次",
+        ("自动", "不该动"): "D13 抽样：14 条 × 1 次",
+    }
+
+    matrix: list[dict[str, Any]] = []
+    by_type: dict[str, dict[str, Any]] = {}
+    for set_name in ("人工", "自动"):
+        for bucket in ("要做事", "不该动"):
+            pool = d15[set_name] if bucket == "要做事" else old[set_name]
+            s_rows = pick(pool["strong"], tasks_of[set_name], bucket)
+            w_rows = pick(pool["weak"], tasks_of[set_name], bucket)
+            report = compare_by_type(s_rows, w_rows, tasks_of[set_name])
+            row = report[bucket]
+            by_type[set_name + bucket] = row
+            matrix.append({
+                "set": set_name, "bucket": bucket, "strong": row["strong"], "weak": row["weak"],
+                "gap": row["gap"], "n": row["runs"], "threshold": row["threshold"],
+                "direction": row["direction"], "source": sources[(set_name, bucket)],
+            })
+
+    action_row = by_type["自动要做事"]
     audit = json.loads((RESULTS / "audit_s2.json").read_text(encoding="utf-8"))
-    critical = sum(1 for o in auto_strong + auto_weak
+    critical = sum(1 for o in d15["自动"]["strong"]
                    if o.category in ("forbidden_tool", "premature_finish",
                                      "hallucinated_result", "tool_call_malformed")
-                   and not o.passed and o.agent == "strong")
+                   and not o.passed)
     gate = evaluate({
         "executable_rate": audit["executable"]["executable_rate"],
         "consistency_rate": audit["deterministic"]["consistency_rate"],
-        "action_gap": by_type["要做事"]["gap"],
-        "action_runs": by_type["要做事"]["runs"],
+        "action_gap": action_row["gap"],
+        "action_runs": action_row["runs"],
         "critical_count": critical,
     })
 
-    matrix = []
-    for name, path in (("S1", "gen_s1"), ("S2", "gen_s2")):
-        tasks = load_tasks("tasks/{0}.jsonl".format(path))
-        strong = load_outcomes(RESULTS / "d11_{0}_strong.jsonl".format(name))
-        weak = load_outcomes(RESULTS / "d11_{0}_weak.jsonl".format(name))
-        report = compare_by_type(strong, weak, tasks)
-        for bucket in ("要做事", "不该动"):
-            row = report[bucket]
-            matrix.append({"set": name, "bucket": bucket, "strong": row["strong"],
-                           "weak": row["weak"], "gap": row["gap"], "direction": row["direction"]})
-
-    totals = token_totals(auto_strong + auto_weak)
-    cost = cost_of(totals)
-    cost_text = "金额暂缺（.env 未配单价）" if cost is None else "{0:.4f} 元".format(cost["total"])
+    all_d15 = d15["人工"]["strong"] + d15["人工"]["weak"] + d15["自动"]["strong"] + d15["自动"]["weak"]
+    tokens = token_mean(all_d15)
+    tokens["note"] = ("单任务平均 = 总 token ÷ 执行次数（{0} 次，D15 两批合计）。"
+                      "**不报金额**：峰谷定价（工作日 9-12 / 14-18 双倍）和缓存命中率"
+                      "（命中与未命中差 100 倍以上）都会让同一批实验算出不同数字，复现不出来。"
+                      "token 是精确的。").format(tokens["runs"])
 
     data = {
-        "meta": "数据源：人工集 42 条 + 自动集 30 条抽样，strong / weak 各跑 1 次；"
-                "矩阵用 S1 / S2 各 100 条（D11）。成本 {0}。".format(cost_text),
+        "meta": "数据源：D15 扩样本（自动集 57 条 × 2 次、人工集 22 条 × 3 次，strong / weak 各跑一遍）"
+                "+ D13 全量（不该动组）。报告只报 token，不报金额。",
         "cards": [
             {"label": "可执行率", "value": "{0:.1%}".format(audit["executable"]["executable_rate"]),
              "how": "跑完不崩的次数 / 总次数（D8，30 条 × 3 次）"},
             {"label": "一致率", "value": "{0:.1%}".format(audit["deterministic"]["consistency_rate"]),
              "how": "同一条跑 3 次判定一致的任务数 / 判定过的任务数"},
-            {"label": "要做事组 gap", "value": "{0:+.3f}".format(by_type["要做事"]["gap"]),
-             "how": "p_strong − p_weak（{0} 条 / {1} 次）".format(
-                 by_type["要做事"]["tasks"], by_type["要做事"]["runs"])},
-            {"label": "不该动组 gap", "value": "{0:+.3f}".format(by_type["不该动"]["gap"]),
-             "how": "p_weak − p_strong（{0} 条 / {1} 次），正数=弱 Agent 更保守".format(
-                 by_type["不该动"]["tasks"], by_type["不该动"]["runs"])},
+            {"label": "要做事组 gap", "value": "{0:+.3f}".format(action_row["gap"]),
+             "how": "p_strong − p_weak（自动集 {0} 条 / {1} 次，门槛 {2:.3f}）".format(
+                 action_row["tasks"], action_row["runs"], action_row["threshold"])},
+            {"label": "单任务 token", "value": "{0:,}".format(tokens["total"]),
+             "how": "输入 {0:,} + 输出 {1:,}，{2} 次执行的均值".format(
+                 tokens["input"], tokens["output"], tokens["runs"])},
         ],
         "gate": gate,
         "matrix": matrix,
-        "distribution": build_distribution(auto_strong, auto_weak, auto_tasks),
+        # 分布要覆盖两组：要做事来自 D15，不该动来自 D13（不然"不该动"那排全是 0）
+        "distribution": build_distribution(
+            pick(d15["自动"]["strong"], auto_tasks, "要做事")
+            + pick(old["自动"]["strong"], auto_tasks, "不该动"),
+            pick(d15["自动"]["weak"], auto_tasks, "要做事")
+            + pick(old["自动"]["weak"], auto_tasks, "不该动"), auto_tasks),
+        "instruction_following": build_instruction_following(
+            human_tasks, d15["人工"]["strong"], d15["人工"]["weak"]),
+        "tokens": tokens,
         "trajectories": build_trajectories(),
     }
     path = write_report(data, RESULTS / "report.html")
     print("门禁:", gate["status"], "| 未过:", gate["failed"] or "无")
+    for row in matrix:
+        print("  {0} {1}: strong {2:.3f} weak {3:.3f} gap {4:+.3f} n={5} 门槛 {6:.3f} | {7}".format(
+            row["set"], row["bucket"], row["strong"], row["weak"], row["gap"],
+            row["n"], row["threshold"], row["direction"]))
+    print("  token 单任务平均: 输入 {0:,} / 输出 {1:,} / 合计 {2:,}".format(
+        tokens["input"], tokens["output"], tokens["total"]))
     print("报告:", path)
     print("diff:", (RESULTS / "diff.md").resolve())
 

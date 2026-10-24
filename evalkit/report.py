@@ -3,7 +3,8 @@
 **所有数据在构建时内联进 HTML**，页面里没有任何 fetch——
 `file://` 下 fetch 会被 CORS 拦，双击打开就是白屏。
 
-四块：顶部四个数字 / 矩阵表 / 区分度分布 / 轨迹查看器。
+七块：四个数字 / 门禁明细 / 矩阵 / 区分度分布 / 指令遵循 / Token 消耗 / 轨迹查看器。
+**不报金额，只报 token**——金额受峰谷定价和缓存命中影响，复现不出同一个数。
 样式：浅色底、中文、数字等宽、无渐变无动画。
 """
 from __future__ import annotations
@@ -80,6 +81,8 @@ def build_html(data: dict[str, Any]) -> str:
     cards = data["cards"]
     matrix = data["matrix"]
     dist = data["distribution"]
+    tokens = data.get("tokens") or {"input": 0, "output": 0, "total": 0, "runs": 0, "note": ""}
+    following = data.get("instruction_following") or {"rows": [], "note": ""}
     tasks = data["trajectories"]
 
     status_cls = "pass" if gate["status"] == "PASS" else "fail"
@@ -101,9 +104,11 @@ def build_html(data: dict[str, Any]) -> str:
 
     matrix_rows = "".join(
         "<tr><td>{0}</td><td>{1}</td><td class='n'>{2}</td><td class='n'>{3}</td>"
-        "<td class='n'>{4}</td><td>{5}</td></tr>".format(
+        "<td class='n'>{4}</td><td class='n'>{5}</td><td class='n'>{6}</td>"
+        "<td>{7}</td><td>{8}</td></tr>".format(
             row["set"], row["bucket"], _fmt(row["strong"]), _fmt(row["weak"]),
-            "{0:+.3f}".format(row["gap"]), row["direction"])
+            "{0:+.3f}".format(row["gap"]), row.get("n", ""), _fmt(row.get("threshold", 0.0)),
+            row["direction"], row.get("source", ""))
         for row in matrix
     )
 
@@ -115,6 +120,29 @@ def build_html(data: dict[str, Any]) -> str:
             b["label"], b["count"] / max_count * 100, b["color"], b["count"])
         for b in dist["buckets"]
     )
+
+    token_rows = "".join(
+        "<tr><td>{0}</td><td class='n'>{1}</td><td>{2}</td></tr>".format(name, "{0:,}".format(value), how)
+        for name, value, how in (
+            ("输入", tokens["input"], "prompt_tokens_mean，单任务平均，取整"),
+            ("输出", tokens["output"], "completion_tokens_mean，单任务平均，取整"),
+            ("合计", tokens["total"], "两者相加；{0} 次执行的均值".format(tokens["runs"])),
+        )
+    )
+
+    follow_rows = "".join(
+        "<tr><td>{0}</td><td>{1}</td><td>{2}</td><td class='n'>{3}</td><td class='n'>{4}</td>"
+        "<td>{5}</td></tr>".format(
+            r["task_id"], r["agent"], r["instruction"], "{0:.2f}".format(r["expect"]),
+            r["actual"], "按指令" if r["ok"] else "<span style='color:#b3261e;font-weight:600'>按规则自己算</span>")
+        for r in following["rows"]
+    )
+    follow_block = ""
+    if follow_rows:
+        follow_block = """<h2>五、指令遵循（027 / 028）</h2>
+<table><thead><tr><th>任务</th><th>Agent</th><th>指令</th><th>期望金额</th><th>实际提交</th><th>结论</th></tr></thead>
+<tbody>{rows}</tbody></table>
+<div class="legend">{note}</div>""".format(rows=follow_rows, note=following["note"])
 
     cards_html = "".join(
         '<div class="card"><div class="k">{0}</div><div class="v num">{1}</div>'
@@ -139,7 +167,8 @@ def build_html(data: dict[str, Any]) -> str:
 <tbody>{gate_rows}</tbody></table>
 
 <h2>三、矩阵</h2>
-<table><thead><tr><th>集</th><th>组</th><th>strong</th><th>weak</th><th>gap</th><th>方向</th></tr></thead>
+<table><thead><tr><th>集</th><th>组</th><th>strong</th><th>weak</th><th>gap</th>
+<th>N（观测）</th><th>门槛</th><th>方向</th><th>数据源</th></tr></thead>
 <tbody>{matrix_rows}</tbody></table>
 <div class="legend">要做事组 gap = p_strong − p_weak（正数=弱 Agent 做不成事）；
 不该动组 gap = p_weak − p_strong（正数=弱 Agent 更保守）。两个数不合并。</div>
@@ -148,7 +177,14 @@ def build_html(data: dict[str, Any]) -> str:
 <div class="bars">{bars}</div>
 <div class="legend">{dist_note}</div>
 
-<h2>五、轨迹查看器</h2>
+{follow_block}
+
+<h2>六、Token 消耗（单任务平均）</h2>
+<table><thead><tr><th>项</th><th>值</th><th>怎么算的</th></tr></thead>
+<tbody>{token_rows}</tbody></table>
+<div class="legend">{token_note}</div>
+
+<h2>七、轨迹查看器</h2>
 <div class="viewer">
   <div class="list" id="list"></div>
   <div class="detail" id="detail"><div class="empty">左边点一条任务看轨迹</div></div>
@@ -196,7 +232,9 @@ if (DATA.length) {{ document.querySelectorAll('.item')[0].click(); }}
 </script>
 </body></html>""".format(css=CSS, meta=data["meta"], banner="".join(banner), cards=cards_html,
                          gate_rows=gate_rows, matrix_rows=matrix_rows, bars=bars,
-                         dist_note=dist["note"], payload=payload)
+                         dist_note=dist["note"], payload=payload,
+                         follow_block=follow_block, token_rows=token_rows,
+                         token_note=tokens["note"])
 
 
 def write_report(data: dict[str, Any], out_path: str | Path) -> Path:

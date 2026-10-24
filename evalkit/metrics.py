@@ -115,10 +115,16 @@ def _step_range(rows: list[TaskResult]) -> dict:
 
 
 def compute(results: list[TaskResult], price: dict | None = None) -> dict[str, Any]:
-    """汇总所有指标。`price` 形如 {"input_per_1m": 0.15, "output_per_1m": 0.6}。
+    """汇总所有指标。
 
-    单价**从外部传**，不写死在代码里——写死的话改价就得改代码，而且会和 results/ 里的
-    历史记录对不上。没传单价时 `cost_per_task` 返回 None（暂缺），不填 0 冒充。
+    **`cost_per_task` 恒为 None（暂不使用）。** 2026-10-25 起不报金额，只报 token：
+
+    - 单价受**峰谷定价**影响（工作日 9-12 / 14-18 双倍），同一批实验换个时段跑，金额就不同
+    - 缓存命中与否差 100 倍以上（未命中 3 元/百万 vs 命中 0.025 元/百万），
+      而命中率取决于前面的调用，同一任务跑两次都可能不一样
+
+    → 金额**复现不出同一个数**，写进报告就是假精确。token 是精确的，先只报 token。
+    `price` 参数保留只为兼容旧调用，传了也不用。
     """
     total = len(results)
     passed_rows = [r for r in results if r.passed]
@@ -139,14 +145,6 @@ def compute(results: list[TaskResult], price: dict | None = None) -> dict[str, A
     wall = sum(r.wall_time_ms for r in results)
 
     cost_per_task = None
-    if price is not None:
-        unit_in = float(price.get("input_per_1m", 0.0))
-        unit_out = float(price.get("output_per_1m", 0.0))
-        per_task = [
-            r.prompt_tokens / 1_000_000 * unit_in + r.completion_tokens / 1_000_000 * unit_out
-            for r in results
-        ]
-        cost_per_task = round(sum(per_task) / total, 8) if total else None
 
     return {
         "total": total,

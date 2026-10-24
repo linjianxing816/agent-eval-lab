@@ -106,8 +106,11 @@ def test_tokens_and_time(stats):
     assert stats["llm_time_ratio"] == pytest.approx(0.9995, abs=1e-4)
 
 
-def test_cost_per_task(stats):
-    assert stats["cost_per_task"] == pytest.approx(0.0002394, abs=1e-9)
+def test_cost_per_task_is_always_none(stats):
+    # 2026-10-25 起不报金额：峰谷定价 + 缓存命中率都会让同一批实验算出不同金额。
+    # 字段保留（下游有读的地方），恒为 None。
+    assert stats["cost_per_task"] is None
+    assert compute(SAMPLES, price={"input_per_1m": 1, "output_per_1m": 8})["cost_per_task"] is None
 
 
 def test_failure_distribution_has_all_ten_keys(stats):
@@ -129,9 +132,13 @@ def test_empty_list_returns_zeros():
     assert sum(stats["failure_distribution"].values()) == 0
 
 
-def test_cost_is_none_without_price():
-    # 没给单价就报"暂缺"，不填 0 冒充
-    assert compute(SAMPLES)["cost_per_task"] is None
+def test_token_means_are_exact():
+    # 金额复现不出来，token 是精确的 —— 报告只报这三个数
+    stats = compute(SAMPLES)
+    assert stats["prompt_tokens_mean"] > 0
+    assert stats["completion_tokens_mean"] > 0
+    assert stats["total_tokens_mean"] == pytest.approx(
+        stats["prompt_tokens_mean"] + stats["completion_tokens_mean"], abs=1e-9)
 
 
 def test_from_verdict_flattens_judge_output():
