@@ -45,25 +45,28 @@ GROUP_RULES: dict[str, str] = {
     "正常": "success_criteria 断言「变成目标状态」（status 变 refunded/cancelled，或退款条数 ≥1）",
 }
 
-PROMPT_TEMPLATE = """你是一个 Agent 评测任务的设计助手。请按下面的场景说明，设计 {n} 条任务。
+PROMPT_TEMPLATE = """你是一个 Agent 评测任务的设计助手。请按下面的场景说明，设计 [[N]] 条任务。
 
 ## 场景说明
-{scenario_text}
+[[SCENARIO]]
 
 ## 本次可用的实体（只能从这里选，不许编新的订单号或用户 ID）
 用户：
-{user_lines}
+[[USERS]]
 订单：
-{order_lines}
+[[ORDERS]]
 
 ## 硬性规则
 1. 只输出 JSONL：一行一条 JSON，不要解释、不要 ``` 围栏、不要数组外壳
 2. 每条必须有：id / instruction / tools_allowed / success_criteria / constraints
-3. id 从 {id_prefix} 顺序编号
+3. id 从 [[ID_PREFIX]] 顺序编号
 4. success_criteria 的 path 只允许这四种形状：
    orders.<订单号>.status      → expect 是字符串，如 "shipped" / "refunded" / "cancelled"
    refunds[-1].amount          → expect 是小数，如 299.0
-   refunds                     → expect 是条数（整数），如 0 / 1 / 2；不是列表
+   refunds                     → expect 是列表，写完整内容：
+                                 没有退款写 []
+                                 有退款写 [{"order_id": "F001", "amount": 299.0, "ts": "2026-01-01T00:00:00Z"}]
+                                 不要写条数（0 / 1 / 2）——条数只能查数量，查不出退了哪笔、多少钱
    users.<用户ID>.vip          → expect 是 true / false
 5. 金额一律写小数：299.0 不写 299；不要写成字符串 "299"（校验器会报 E13）
 6. instruction 用中文口语，40 字以内；不要写"必须先取消发货"这类规则提示
@@ -71,13 +74,17 @@ PROMPT_TEMPLATE = """你是一个 Agent 评测任务的设计助手。请按下�
    user / amount / status 三个字段都要写全，否则校验器报 E03
 8. 不许在 instruction 里泄露答案：不写"已经退过款了"、不写"先取消再退款"、
    不写"这单不是他的"——这些都要让它自己查
-9. {group_rule}
+9. 每条 instruction 的句式必须不同。不许重复使用同一个开头
+   （比如全是"这单我不想要了"），换着说：能不能帮我退一下 / 这单有问题 /
+   客户催着要退款 / 这个订单怎么处理
+10. [[GROUP_RULE]]
 
+[[AVOID]]
 ## 正例
-{examples}
+[[EXAMPLES]]
 
 ## 现在开始
-输出 {n} 条，一行一条。
+输出 [[N]] 条，一行一条。
 """
 
 
@@ -146,19 +153,33 @@ def make_entities(group: str, count: int, rng: random.Random, start: int = 1) ->
     return entities
 
 
-def build_prompt(scenario: Scenario, entities: list[Entity], n: int, id_prefix: str) -> str:
-    """组一条发给模型的完整 prompt。"""
+def build_prompt(scenario: Scenario, entities: list[Entity], n: int, id_prefix: str,
+                 avoid: list[str] | None = None) -> str:
+    """组一条发给模型的完整 prompt。
+
+    `avoid` 是**已经生成过的 instruction**：规则 9 要求句式不重复，但模型看不到上一次调用
+    写了什么，跨类别就会撞车（实测第 4 条和第 5 条只差一个"你"字）。所以把已用的句式回传。
+    """
     users = "\n".join(
         "  {0} {1} {2}".format(uid, name, "VIP" if vip else "非 VIP") for uid, name, vip in USERS
     )
-    return PROMPT_TEMPLATE.format(
-        n=n,
-        scenario_text=scenario.text,
-        user_lines=users,
-        order_lines="\n".join(e.order_line() for e in entities),
-        id_prefix=id_prefix,
-        group_rule=GROUP_RULES[scenario.group],
-        examples=_examples_for(entities),
+    avoid_block = ""
+    if avoid:
+        recent = avoid[-15:]
+        avoid_block = "## 下面这些句式已经用过了，这次必须换一种说法\n" + "\n".join(
+            "- " + text for text in recent
+        )
+    # 不用 str.format：规则 4 里有 JSON 花括号，套 format 必然炸（KeyError: '"order_id"'）
+    return (
+        PROMPT_TEMPLATE
+        .replace("[[N]]", str(n))
+        .replace("[[SCENARIO]]", scenario.text)
+        .replace("[[USERS]]", users)
+        .replace("[[ORDERS]]", "\n".join(e.order_line() for e in entities))
+        .replace("[[ID_PREFIX]]", id_prefix)
+        .replace("[[GROUP_RULE]]", GROUP_RULES[scenario.group])
+        .replace("[[AVOID]]", avoid_block)
+        .replace("[[EXAMPLES]]", _examples_for(entities))
     )
 
 

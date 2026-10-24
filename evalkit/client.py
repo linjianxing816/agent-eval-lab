@@ -83,11 +83,13 @@ class ModelClient(Protocol):
 
 class DeepSeekClient:
     def __init__(self, settings: Settings, thinking: bool = False,
-                 timeout: float = DEFAULT_TIMEOUT, transport: httpx.BaseTransport | None = None) -> None:
+                 timeout: float = DEFAULT_TIMEOUT, transport: httpx.BaseTransport | None = None,
+                 max_tokens: int = 1024) -> None:
         self._settings = settings
         self._thinking = thinking
         self._timeout = timeout
         self._transport = transport
+        self._max_tokens = max_tokens
         self.last_elapsed_ms: float = 0.0
 
     def chat(self, messages: list[dict], tools: list[dict]) -> ChatReply:
@@ -97,7 +99,7 @@ class DeepSeekClient:
             "tools": tools,
             "tool_choice": "auto",
             "temperature": 0,
-            "max_tokens": 1024,
+            "max_tokens": self._max_tokens,
             # 原始 HTTP 请求里这个参数直接放 body 顶层（SDK 里才叫 extra_body）
             "thinking": {"type": "enabled" if self._thinking else "disabled"},
         }

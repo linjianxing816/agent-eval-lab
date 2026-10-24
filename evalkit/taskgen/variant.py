@@ -88,6 +88,14 @@ def check_structure(task: dict, group: str) -> str | None:
     statuses = initial_statuses(task)
     forbid = (task.get("constraints") or {}).get("forbid_tools") or []
 
+    # 所有类别通用：refunds 必须写列表，不许写条数。
+    # 两种写法不等价——`[]` 只查"没有退款"，`[整条记录]` 能查"退了哪笔、多少钱"。
+    # 人工集 15 条全是列表，自动集写条数会天然更宽松，D12 的"自动集更好"就是假的。
+    for item in criteria:
+        if str(item.get("path", "")).strip().endswith("refunds"):
+            if not isinstance(item.get("expect"), list):
+                return "refunds 断言必须写列表，不许写条数"
+
     def status_asserts() -> list[tuple[str, str]]:
         out = []
         for item in criteria:
@@ -145,8 +153,14 @@ def check_structure(task: dict, group: str) -> str | None:
 
 def generate(client: ModelClient, plan: dict[str, int], out_path: Path,
              scenarios: dict[str, Scenario] | None = None, seed: int = 7,
-             known_instructions: list[str] | None = None) -> tuple[list[dict], GenStats]:
-    """按 plan（类别 → 条数）生成，边生成边校验边落盘。"""
+             known_instructions: list[str] | None = None, chunk_size: int = 10,
+             max_attempts: int = 5) -> tuple[list[dict], GenStats]:
+    """按 plan（类别 → 目标条数）生成，边生成边校验边落盘。
+
+    **分块调用的原因不是"策略"，是输出上限**：一次要 33 条，响应会被 max_tokens 截断。
+    每块最多 `chunk_size` 条，凑不够目标就再来一块，最多 `max_attempts` 块。
+    **凑不满就按实际接受数记账，不重试到满、不凑数**——有效生成率本身就是 D6 的数字。
+    """
     import random
 
     rng = random.Random(seed)
@@ -155,37 +169,45 @@ def generate(client: ModelClient, plan: dict[str, int], out_path: Path,
     accepted: list[dict] = []
     stats = GenStats()
     order_seq = 1
-    for group, count in plan.items():
+    for group, target in plan.items():
         scenario = book.get(group)
         if scenario is None:
             continue
-        entities = make_entities(group, max(count, 2), rng, start=order_seq)
-        order_seq += len(entities)
-        prompt = build_prompt(scenario, entities, count, "gen-s1-001")
-        reply = client.chat([{"role": "user", "content": prompt}], [])
-        raw = reply.message.get("content") or ""
-        items, bad = parse_lines(raw)
-        stats.generated += len(items) + bad
-        if bad:
-            stats.dropped["parse_error"] += bad
-        for item in items:
-            item["source"] = "generated"
-            item["scenario"] = group
-            issues: list[Issue] = validate_task(item, 0, {})
-            if any(i.level == "error" for i in issues):
-                stats.drop("schema_error")
-                continue
-            drift = check_structure(item, group)
-            if drift:
-                stats.drop("structure_drift")
-                continue
-            key = normalize(str(item.get("instruction", "")))
-            if key in seen:
-                stats.drop("duplicate")
-                continue
-            seen.add(key)
-            item["id"] = "gen-s1-{0:03d}".format(len(accepted) + 1)
-            accepted.append(item)
+        got, attempts = 0, 0
+        while got < target and attempts < max_attempts:
+            attempts += 1
+            need = min(chunk_size, target - got)
+            entities = make_entities(group, max(need, 2), rng, start=order_seq)
+            order_seq += len(entities)
+            prompt = build_prompt(scenario, entities, need, "gen-s1-001",
+                                  avoid=[t["instruction"] for t in accepted])
+            reply = client.chat([{"role": "user", "content": prompt}], [])
+            raw = reply.message.get("content") or ""
+            items, bad = parse_lines(raw)
+            stats.generated += len(items) + bad
+            if bad:
+                stats.dropped["parse_error"] += bad
+            for item in items:
+                item["source"] = "generated"
+                item["scenario"] = group
+                issues: list[Issue] = validate_task(item, 0, {})
+                if any(i.level == "error" for i in issues):
+                    stats.drop("schema_error")
+                    continue
+                drift = check_structure(item, group)
+                if drift:
+                    stats.drop("structure_drift")
+                    continue
+                key = normalize(str(item.get("instruction", "")))
+                if key in seen:
+                    stats.drop("duplicate")
+                    continue
+                seen.add(key)
+                item["id"] = "gen-s1-{0:03d}".format(len(accepted) + 1)
+                accepted.append(item)
+                got += 1
+                if got >= target:
+                    break
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(json.dumps(t, ensure_ascii=False) for t in accepted) + "\n", encoding="utf-8")
     stats.accepted = len(accepted)
