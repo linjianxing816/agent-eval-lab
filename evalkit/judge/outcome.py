@@ -73,9 +73,16 @@ def resolve_path(data: Any, path: str) -> Any:
 
 
 def values_match(expected: Any, actual: Any) -> bool:
-    """数字一律 round 到两位再比；其他类型直接比。"""
+    """数字一律 round 到两位再比；其他类型直接比。
+
+    **列表 + 整数 = 比条数**：`{"path": "refunds", "expect": 0}` 意思是"退款记录 0 条"。
+    生成任务用这种写法（比全量列表短、模型不容易写错）。
+    `{"path": "refunds", "expect": []}` 仍然支持，是全量比对——42 条人工任务在用。
+    """
     if isinstance(expected, bool) or isinstance(actual, bool):
         return expected == actual
+    if isinstance(actual, (list, tuple)) and isinstance(expected, int):
+        return len(actual) == expected
     if isinstance(expected, (int, float)) and isinstance(actual, (int, float)):
         return round(float(expected), MONEY_DIGITS) == round(float(actual), MONEY_DIGITS)
     return expected == actual

@@ -192,6 +192,9 @@ def _check_criterion(item: dict, index: int, state: dict, line: int, task_id: st
         return out                      # 合法但运行时才出现，类型无从比对
     if isinstance(expected, bool) or isinstance(actual, bool):
         return out
+    # 列表 + 整数 = 比条数，合法写法（`refunds` expect 0 表示"0 条退款记录"）
+    if isinstance(actual, list) and isinstance(expected, int):
+        return out
     expected_numeric = isinstance(expected, (int, float))
     actual_numeric = isinstance(actual, (int, float))
     if expected_numeric and actual_numeric:
