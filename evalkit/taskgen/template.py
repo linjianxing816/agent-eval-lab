@@ -152,7 +152,11 @@ def make_entity_sets(group: str, n_tasks: int, rng: random.Random,
     seq = start
     for _ in range(n_tasks):
         size = fixed or rng.choice((1, 2))
-        sets.append(_one_set(group, size, rng, seq, is_first=not sets))
+        # 状态陷阱**每条任务**都要有预置订单，不能只给每批第一个——
+        # 只给第一个的话，后面几条没有可预置的订单，模型只能瞎写，
+        # 实测 chunk_size=5 时 24 条因此被判 structure_drift。
+        preset = group == "状态陷阱"
+        sets.append(_one_set(group, size, rng, seq, is_first=preset))
         seq += size
     return sets
 

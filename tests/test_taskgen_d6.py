@@ -60,8 +60,10 @@ def test_entities_are_allocated_per_task_not_per_chunk():
 def test_state_trap_presets_first_order():
     import random
     sets = make_entity_sets("状态陷阱", 2, random.Random(2), start=1)
-    assert sets[0][0].status in ("cancelled", "refunded")
-    assert all(e.status == "shipped" for e in sets[1])
+    # 每条任务都要有预置订单（D7 修：只给第一个任务预置会让后面几条无单可预置）
+    for group in sets:
+        assert group[0].status in ("cancelled", "refunded")
+        assert all(e.status == "shipped" for e in group[1:])
 
 
 def test_prompt_contains_entities_and_group_rule():

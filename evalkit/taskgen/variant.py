@@ -19,6 +19,7 @@ from typing import Any
 from evalkit.client import ModelClient
 from evalkit.env.state import build_initial
 from evalkit.tasks import Issue, validate_task
+from evalkit.taskgen.dedup import find_duplicate, shingles
 from evalkit.taskgen.template import (
     AMOUNTS,
     Entity,
@@ -33,6 +34,15 @@ NORMALIZE_PATTERN = re.compile(r"[\s，。！？、,.!?;；:：\"'“”‘’�
 ALLOWED_AMOUNTS = set(AMOUNTS) | {round(a * 0.9, 2) for a in AMOUNTS}
 CHANGED_STATUSES = ("refunded", "cancelled")
 
+# 规则 8：instruction 不许泄露答案。命中就判 structure_drift。
+# 这八条覆盖三类泄露：状态（已退款 / 已经退过 / 已经处理过 / 不用再退）、
+# 顺序（先取消发货 / 必须先取消）、权限（不是他的 / 不是这个用户的）。
+LEAK_WORDS = (
+    "已退款", "已经退过", "已经处理过", "不用再退",
+    "先取消发货", "必须先取消",
+    "不是他的", "不是这个用户的",
+)
+
 
 @dataclass
 class GenStats:
@@ -40,12 +50,19 @@ class GenStats:
     accepted: int = 0
     dropped: dict[str, int] = None
 
+    drop_log: list = None
+
     def __post_init__(self) -> None:
         if self.dropped is None:
             self.dropped = {"schema_error": 0, "structure_drift": 0, "duplicate": 0, "parse_error": 0}
+        if self.drop_log is None:
+            self.drop_log = []
 
-    def drop(self, reason: str) -> None:
+    def drop(self, reason: str, group: str = "", detail: str = "", instruction: str = "") -> None:
         self.dropped[reason] = self.dropped.get(reason, 0) + 1
+        self.drop_log.append({
+            "group": group, "reason": reason, "detail": detail, "instruction": instruction,
+        })
 
 
 def normalize(text: str) -> str:
@@ -80,9 +97,21 @@ def initial_statuses(task: dict) -> dict[str, str]:
     return {order_id: data.get("status") for order_id, data in orders.items()}
 
 
+def check_leak(task: dict) -> str | None:
+    """规则 8：instruction 不许泄露答案。命中关键词返回原因。"""
+    text = str(task.get("instruction") or "")
+    for word in LEAK_WORDS:
+        if word in text:
+            return "instruction 泄露答案：命中「{0}」".format(word)
+    return None
+
+
 def check_structure(task: dict, group: str) -> str | None:
     """类别级结构校验。通过返回 None，否则返回原因。"""
     criteria = task.get("success_criteria") or []
+    leaked = check_leak(task)
+    if leaked:
+        return leaked
     if not isinstance(criteria, list) or not criteria:
         return "success_criteria 为空"
     # 一条任务最多 4 条断言。人工集 max 4；断言多的任务天然更难判，
@@ -194,7 +223,8 @@ def _wrong_amount(task: dict) -> str | None:
 def generate(client: ModelClient, plan: dict[str, int], out_path: Path,
              scenarios: dict[str, Scenario] | None = None, seed: int = 7,
              known_instructions: list[str] | None = None, chunk_size: int = 10,
-             max_attempts: int = 5) -> tuple[list[dict], GenStats]:
+             max_attempts: int = 5, jaccard_threshold: float | None = None,
+             drop_log_path: Path | None = None) -> tuple[list[dict], GenStats]:
     """按 plan（类别 → 目标条数）生成，边生成边校验边落盘。
 
     **分块调用的原因不是"策略"，是输出上限**：一次要 33 条，响应会被 max_tokens 截断。
@@ -207,6 +237,9 @@ def generate(client: ModelClient, plan: dict[str, int], out_path: Path,
     book = scenarios if scenarios is not None else read_scenarios()
     seen = {normalize(text) for text in (known_instructions or [])}
     accepted: list[dict] = []
+    # Jaccard 只在**本次生成集内部**比，不和人工集比——
+    # 和人工集比会把"和人工集相似"的任务丢掉，D12 再比两套就失真了。
+    jaccard_pool: list[tuple[str, set[str]]] = []
     stats = GenStats()
     order_seq = 1
     for group, target in plan.items():
@@ -230,19 +263,27 @@ def generate(client: ModelClient, plan: dict[str, int], out_path: Path,
             for item in items:
                 item["source"] = "generated"
                 item["scenario"] = group
+                text = str(item.get("instruction", ""))
                 issues: list[Issue] = validate_task(item, 0, {})
                 if any(i.level == "error" for i in issues):
-                    stats.drop("schema_error")
+                    stats.drop("schema_error", group, issues[0].message, text)
                     continue
                 drift = check_structure(item, group)
                 if drift:
-                    stats.drop("structure_drift")
+                    stats.drop("structure_drift", group, drift, text)
                     continue
-                key = normalize(str(item.get("instruction", "")))
+                key = normalize(text)
                 if key in seen:
-                    stats.drop("duplicate")
+                    stats.drop("duplicate", group, "归一化后完全相同", text)
                     continue
+                if jaccard_threshold is not None:
+                    score, hit = find_duplicate(text, jaccard_pool, jaccard_threshold)
+                    if hit is not None:
+                        stats.drop("duplicate", group,
+                                   "Jaccard {0:.3f} 撞「{1}」".format(score, hit), text)
+                        continue
                 seen.add(key)
+                jaccard_pool.append((text, shingles(text)))
                 item["id"] = "gen-s1-{0:03d}".format(len(accepted) + 1)
                 accepted.append(item)
                 got += 1
@@ -250,6 +291,12 @@ def generate(client: ModelClient, plan: dict[str, int], out_path: Path,
                     break
     out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(json.dumps(t, ensure_ascii=False) for t in accepted) + "\n", encoding="utf-8")
+    if drop_log_path is not None:
+        drop_log_path.parent.mkdir(parents=True, exist_ok=True)
+        drop_log_path.write_text(
+            "\n".join(json.dumps(d, ensure_ascii=False) for d in stats.drop_log) + "\n",
+            encoding="utf-8",
+        )
     stats.accepted = len(accepted)
     return accepted, stats
 
