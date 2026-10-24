@@ -145,3 +145,16 @@ def test_cost_uses_configured_price(monkeypatch):
     assert result["input_cost"] == 1.0
     assert result["output_cost"] == 8.0
     assert result["total"] == 9.0
+
+
+def test_cost_of_loads_dotenv_from_file(tmp_path):
+    # 真 bug 回归：cost_of 只读 os.environ 而不 load_dotenv，填了单价也永远是 None
+    import os
+    from evalkit.discriminate import cost_of
+    env_file = tmp_path / ".env"
+    env_file.write_text("PRICE_INPUT_PER_1M=2\nPRICE_OUTPUT_PER_1M=9\n", encoding="utf-8")
+    os.environ.pop("PRICE_INPUT_PER_1M", None)
+    os.environ.pop("PRICE_OUTPUT_PER_1M", None)
+    result = cost_of({"runs": 1, "input": 1_000_000, "output": 1_000_000}, env_path=env_file)
+    assert result is not None
+    assert result["input_cost"] == 2.0 and result["output_cost"] == 9.0

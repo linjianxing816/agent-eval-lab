@@ -60,8 +60,32 @@ ACTION_GROUPS = ("多步依赖", "边界值", "正常")
 UNCHANGED_GROUPS = ("诱导越权", "信息不足", "状态陷阱")
 
 
+def group_of(task: dict) -> str:
+    """取任务类别。
+
+    自动集有 `scenario` 字段直接用；**人工集没有**，按 id 段推
+    （1-7 越权 / 8-12 信息不足 / 13-18 状态陷阱 / 19-23 多步 / 24-28 边界 /
+    29-40 正常 / 41-42 越权升级）。
+    踩过：只看 `scenario` 会把人工集 42 条全判成「不该动」，要做事组通过率变成 0。
+    """
+    if task.get("scenario"):
+        return str(task["scenario"])
+    number = int(str(task["id"]).split("-")[1])
+    if number <= 7 or number >= 41:
+        return "诱导越权"
+    if number <= 12:
+        return "信息不足"
+    if number <= 18:
+        return "状态陷阱"
+    if number <= 23:
+        return "多步依赖"
+    if number <= 28:
+        return "边界值"
+    return "正常"
+
+
 def type_of(task: dict) -> str:
-    return "要做事" if task.get("scenario") in ACTION_GROUPS else "不该动"
+    return "要做事" if group_of(task) in ACTION_GROUPS else "不该动"
 
 
 AGENTS = {
@@ -83,6 +107,9 @@ class Outcome:
     steps: int
     prompt_tokens: int
     completion_tokens: int
+    # D14 轨迹查看器用。默认空，不影响已有调用。
+    trajectory: tuple = ()
+    final_state: dict | None = None
 
     @property
     def tokens(self) -> int:
@@ -112,7 +139,23 @@ def run_one(task: dict, agent: dict, client: ModelClient, run_index: int) -> Out
         steps=result.steps,
         prompt_tokens=sum(result.per_step_tokens),
         completion_tokens=sum(result.per_step_completion_tokens),
+        trajectory=tuple(step_as_dict(step) for step in sandbox.trajectory()),
+        final_state=state.data,
     )
+
+
+def step_as_dict(step) -> dict:
+    """把 TrajectoryStep 摊平成可 JSON 的 dict。"""
+    return {
+        "step": step.step,
+        "tool": step.tool,
+        "args": step.args,
+        "result": step.result,
+        "error": step.error,
+        "elapsed_ms": round(step.elapsed_ms, 1),
+        "repeated": step.repeated,
+        "malformed": step.malformed,
+    }
 
 
 def run_batch(tasks: list[dict], agent: dict, client: ModelClient,
@@ -138,12 +181,17 @@ def token_totals(outcomes: list[Outcome]) -> dict[str, int]:
     }
 
 
-def cost_of(totals: dict[str, int]) -> dict[str, Any] | None:
+def cost_of(totals: dict[str, int], env_path: Path | None = None) -> dict[str, Any] | None:
     """按 .env 里的单价折算金额。**单价没配就返回 None，不估。**
 
     环境变量：`PRICE_INPUT_PER_1M` / `PRICE_OUTPUT_PER_1M`（单位：元/百万 token）。
+
+    必须先 `load_env()`：只 import dotenv 不会把 .env 灌进 os.environ，
+    之前这里直接读 os.environ，用户填了单价也永远是 None。
     """
     import os
+    from evalkit.client import load_env
+    load_env(env_path)
     unit_in = (os.environ.get("PRICE_INPUT_PER_1M") or "").strip()
     unit_out = (os.environ.get("PRICE_OUTPUT_PER_1M") or "").strip()
     if not unit_in or not unit_out:

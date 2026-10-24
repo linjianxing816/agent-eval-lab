@@ -49,6 +49,17 @@ class ChatReply:
     usage: dict
 
 
+def load_env(env_path: Path | None = None) -> None:
+    """把 .env 灌进 os.environ。
+
+    **任何读 os.environ 的地方都要先调它**——只 import dotenv 不会自动加载。
+    踩过：cost_of() 直接读 os.environ，用户把单价填进 .env 后仍然是 None。
+    """
+    path = ENV_PATH if env_path is None else env_path
+    if path.exists():
+        load_dotenv(path, override=True)
+
+
 def load_settings(env_path: Path | None = None) -> Settings:
     """从 .env 读配置。与 scripts/smoke_llm.py 的同名函数行为一致——
     那边是自检脚本，不反向依赖 evalkit，所以两份实现各自独立。"""
