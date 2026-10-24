@@ -115,9 +115,10 @@ def audit_duplicates(instructions: list[str], threshold: float,
         else:
             pool.append((text, shingles(text)))
     total = len(instructions)
+    kept = sum(len(items) for items in pools.values())
     return {
         "total": total,
-        "kept": len(pool),
+        "kept": kept,
         "duplicate_count": len(duplicates),
         "duplicate_rate": round(len(duplicates) / total, 4) if total else 0.0,
         "duplicates": duplicates,

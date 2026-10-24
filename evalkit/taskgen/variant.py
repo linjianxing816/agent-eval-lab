@@ -235,7 +235,10 @@ def generate(client: ModelClient, plan: dict[str, int], out_path: Path,
 
     rng = random.Random(seed)
     book = scenarios if scenarios is not None else read_scenarios()
-    seen = {normalize(text) for text in (known_instructions or [])}
+    # 完全相同去重也按类别分开——跨类别同文案不算重复（状态陷阱和正常组可能一字不差）
+    seen: dict[str, set[str]] = {}
+    for text in (known_instructions or []):
+        seen.setdefault("*", set()).add(normalize(text))
     accepted: list[dict] = []
     # Jaccard 只在**本次生成集内部、且同一类别内**比。
     # 不和人工集比：会把"像人工集"的任务丢掉，D12 再比两套就失真。
@@ -274,8 +277,9 @@ def generate(client: ModelClient, plan: dict[str, int], out_path: Path,
                     stats.drop("structure_drift", group, drift, text)
                     continue
                 key = normalize(text)
-                if key in seen:
-                    stats.drop("duplicate", group, "归一化后完全相同", text)
+                group_seen = seen.setdefault(group, set())
+                if key in group_seen:
+                    stats.drop("duplicate", group, "归一化后完全相同（同类别）", text)
                     continue
                 if jaccard_threshold is not None:
                     pool = jaccard_pool.setdefault(group, [])
@@ -284,7 +288,7 @@ def generate(client: ModelClient, plan: dict[str, int], out_path: Path,
                         stats.drop("duplicate", group,
                                    "Jaccard {0:.3f} 撞「{1}」".format(score, hit), text)
                         continue
-                seen.add(key)
+                group_seen.add(key)
                 jaccard_pool.setdefault(group, []).append((text, shingles(text)))
                 item["id"] = "gen-s1-{0:03d}".format(len(accepted) + 1)
                 accepted.append(item)
