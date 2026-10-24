@@ -34,6 +34,20 @@ COLOR_ACTION = "#1f5fbf"
 COLOR_UNCHANGED = "#c77700"
 
 
+def load_if_exists(path: Path) -> list[Outcome]:
+    return load_outcomes(path) if path.exists() else []
+
+
+def merge_override(base: list[Outcome], override: list[Outcome]) -> list[Outcome]:
+    """用新数据**替换**同 task_id 的旧记录。
+
+    改了 instruction 就必须重跑那条（judge 不读 instruction，光重判没用），
+    重跑后旧记录作废——两份都留着会把同一任务算两遍。
+    """
+    touched = {o.task_id for o in override}
+    return [o for o in base if o.task_id not in touched] + override
+
+
 def load_outcomes(path: Path) -> list[Outcome]:
     rows = []
     for line in path.read_text(encoding="utf-8").splitlines():
@@ -77,56 +91,66 @@ def _badge(outcome: Outcome) -> str:
 
 
 def build_trajectories() -> list[dict[str, Any]]:
-    """轨迹查看器的数据。用**最新**日志（D15 要做事组 + D13 不该动组），
-    两批的 task_id 不重叠，不会重复。"""
+    """轨迹查看器的数据。
+
+    要做事组用 D15+D16（task-035 用 D16 覆盖旧的），不该动组用 D13。
+    **不能按 (task_id, agent, run) 去重**：不同批次 run 号都从 0 开始，
+    去重会把新记录当成旧的跳过——实测 task-035 就显示成了改动前的失败轨迹。
+    """
     tasks = {t["id"]: t for t in load_tasks("tasks/human40.jsonl")}
     tasks.update({t["id"]: t for t in load_tasks("tasks/gen_s2.jsonl")})
-    sources = (
-        ("d15_human_strong.jsonl", "人工集", "strong"),
-        ("d15_human_weak.jsonl", "人工集", "weak"),
-        ("d15_auto_strong.jsonl", "自动集", "strong"),
-        ("d15_auto_weak.jsonl", "自动集", "weak"),
-        ("d13b_human_strong.jsonl", "人工集", "strong"),
-        ("d13b_human_weak.jsonl", "人工集", "weak"),
-        ("d13_auto_strong.jsonl", "自动集", "strong"),
-        ("d13_auto_weak.jsonl", "自动集", "weak"),
-    )
+
+    def pick_from(path: Path, bucket: str) -> list[Outcome]:
+        rows = load_if_exists(path)
+        groups = ACTION_GROUPS if bucket == "要做事" else UNCHANGED_GROUPS
+        return [o for o in rows if group_of(tasks.get(o.task_id, {})) in groups]
+
+    human = {
+        "strong": merge_override(pick_from(RESULTS / "d15_human_strong.jsonl", "要做事"),
+                                 load_if_exists(RESULTS / "d16_human_strong.jsonl"))
+                  + pick_from(RESULTS / "d13b_human_strong.jsonl", "不该动"),
+        "weak": merge_override(pick_from(RESULTS / "d15_human_weak.jsonl", "要做事"),
+                               load_if_exists(RESULTS / "d16_human_weak.jsonl"))
+                + pick_from(RESULTS / "d13b_human_weak.jsonl", "不该动"),
+    }
+    auto = {
+        "strong": pick_from(RESULTS / "d15_auto_strong.jsonl", "要做事")
+                  + pick_from(RESULTS / "d16_auto_strong.jsonl", "要做事")
+                  + pick_from(RESULTS / "d13_auto_strong.jsonl", "不该动"),
+        "weak": pick_from(RESULTS / "d15_auto_weak.jsonl", "要做事")
+                + pick_from(RESULTS / "d16_auto_weak.jsonl", "要做事")
+                + pick_from(RESULTS / "d13_auto_weak.jsonl", "不该动"),
+    }
+
     rows: list[dict[str, Any]] = []
-    seen: set[tuple[str, str, int]] = set()
-    for filename, label, agent in sources:
-        path = RESULTS / filename
-        if not path.exists():
-            continue
-        for outcome in load_outcomes(path):
-            task = tasks.get(outcome.task_id, {})
-            # D15 只跑了要做事组；D13 那两批只取不该动组，避免同一任务出现两次
-            if filename.startswith("d13") and group_of(task) not in UNCHANGED_GROUPS:
-                continue
-            key = (outcome.task_id, agent, outcome.run)
-            if key in seen:
-                continue
-            seen.add(key)
-            forbid = set((task.get("constraints") or {}).get("forbid_tools") or [])
-            steps = [
-                {
-                    "step": s["step"], "tool": s["tool"],
-                    "args": json.dumps(s["args"], ensure_ascii=False),
-                    "result": json.dumps(s["result"], ensure_ascii=False),
-                    "elapsed_ms": s["elapsed_ms"], "error": s["error"],
-                    "forbidden": s["tool"] in forbid,
-                }
-                for s in outcome.trajectory
-            ]
-            rows.append({
-                "task_id": outcome.task_id,
-                "agent": label + " / " + agent + " · 第 " + str(outcome.run + 1) + " 次",
-                "scenario": group_of(task),
-                "instruction": task.get("instruction", ""),
-                "badge": _badge(outcome),
-                "passed": outcome.passed,
-                "steps": steps,
-                "final_state": json.dumps(outcome.final_state or {}, ensure_ascii=False),
-            })
+    for label, outcomes_by_agent in (("人工集", human), ("自动集", auto)):
+        for agent in ("strong", "weak"):
+            counter: dict[str, int] = {}
+            for outcome in outcomes_by_agent[agent]:
+                task = tasks.get(outcome.task_id, {})
+                counter[outcome.task_id] = counter.get(outcome.task_id, 0) + 1
+                forbid = set((task.get("constraints") or {}).get("forbid_tools") or [])
+                steps = [
+                    {
+                        "step": s["step"], "tool": s["tool"],
+                        "args": json.dumps(s["args"], ensure_ascii=False),
+                        "result": json.dumps(s["result"], ensure_ascii=False),
+                        "elapsed_ms": s["elapsed_ms"], "error": s["error"],
+                        "forbidden": s["tool"] in forbid,
+                    }
+                    for s in outcome.trajectory
+                ]
+                rows.append({
+                    "task_id": outcome.task_id,
+                    "agent": "{0} / {1} · 第 {2} 次".format(
+                        label, agent, counter[outcome.task_id]),
+                    "scenario": group_of(task),
+                    "instruction": task.get("instruction", ""),
+                    "badge": _badge(outcome),
+                    "passed": outcome.passed,
+                    "steps": steps,
+                    "final_state": json.dumps(outcome.final_state or {}, ensure_ascii=False),
+                })
     return rows
 
 
@@ -221,10 +245,22 @@ def main() -> None:
 
     # D15 扩样本：只跑了要做事组（57 条 × 2 次 / 22 条 × 3 次）
     d15 = {
-        "人工": {"strong": load_outcomes(RESULTS / "d15_human_strong.jsonl"),
-                 "weak": load_outcomes(RESULTS / "d15_human_weak.jsonl")},
-        "自动": {"strong": load_outcomes(RESULTS / "d15_auto_strong.jsonl"),
-                 "weak": load_outcomes(RESULTS / "d15_auto_weak.jsonl")},
+        "人工": {"strong": load_if_exists(RESULTS / "d15_human_strong.jsonl"),
+                 "weak": load_if_exists(RESULTS / "d15_human_weak.jsonl")},
+        "自动": {"strong": load_if_exists(RESULTS / "d15_auto_strong.jsonl"),
+                 "weak": load_if_exists(RESULTS / "d15_auto_weak.jsonl")},
+    }
+    # D16：重跑 task-035（改了 instruction）+ 自动集最后一次加样本
+    d16 = {
+        "人工": {"strong": load_if_exists(RESULTS / "d16_human_strong.jsonl"),
+                 "weak": load_if_exists(RESULTS / "d16_human_weak.jsonl")},
+        "自动": {"strong": load_if_exists(RESULTS / "d16_auto_strong.jsonl"),
+                 "weak": load_if_exists(RESULTS / "d16_auto_weak.jsonl")},
+    }
+    # 人工集：task-035 用新记录替换旧的；自动集：两批样本**相加**（不同 run，不重复）
+    action = {
+        "人工": {k: merge_override(d15["人工"][k], d16["人工"][k]) for k in ("strong", "weak")},
+        "自动": {k: d15["自动"][k] + d16["自动"][k] for k in ("strong", "weak")},
     }
     # 不该动组没重跑，从 D13 全量日志里挑
     old = {
@@ -235,9 +271,9 @@ def main() -> None:
     }
     tasks_of = {"人工": human_tasks, "自动": auto_tasks}
     sources = {
-        ("人工", "要做事"): "D15 扩样本：22 条 × 3 次",
+        ("人工", "要做事"): "D15 22 条 × 3 次 + D16 重跑 task-035",
         ("人工", "不该动"): "D13 全量：20 条 × 1 次",
-        ("自动", "要做事"): "D15 扩样本：57 条 × 2 次",
+        ("自动", "要做事"): "D15 57 条 × 2 次 + D16 57 条 × 1 次",
         ("自动", "不该动"): "D13 抽样：14 条 × 1 次",
     }
 
@@ -245,7 +281,7 @@ def main() -> None:
     by_type: dict[str, dict[str, Any]] = {}
     for set_name in ("人工", "自动"):
         for bucket in ("要做事", "不该动"):
-            pool = d15[set_name] if bucket == "要做事" else old[set_name]
+            pool = action[set_name] if bucket == "要做事" else old[set_name]
             s_rows = pick(pool["strong"], tasks_of[set_name], bucket)
             w_rows = pick(pool["weak"], tasks_of[set_name], bucket)
             report = compare_by_type(s_rows, w_rows, tasks_of[set_name])
@@ -259,7 +295,7 @@ def main() -> None:
 
     action_row = by_type["自动要做事"]
     audit = json.loads((RESULTS / "audit_s2.json").read_text(encoding="utf-8"))
-    critical = sum(1 for o in d15["自动"]["strong"]
+    critical = sum(1 for o in action["自动"]["strong"]
                    if o.category in ("forbidden_tool", "premature_finish",
                                      "hallucinated_result", "tool_call_malformed")
                    and not o.passed)
@@ -271,9 +307,10 @@ def main() -> None:
         "critical_count": critical,
     })
 
-    all_d15 = d15["人工"]["strong"] + d15["人工"]["weak"] + d15["自动"]["strong"] + d15["自动"]["weak"]
+    all_d15 = (action["人工"]["strong"] + action["人工"]["weak"]
+               + action["自动"]["strong"] + action["自动"]["weak"])
     tokens = token_mean(all_d15)
-    tokens["note"] = ("单任务平均 = 总 token ÷ 执行次数（{0} 次，D15 两批合计）。"
+    tokens["note"] = ("单任务平均 = 总 token ÷ 执行次数（{0} 次，D15+D16 合计）。"
                       "**不报金额**：峰谷定价（工作日 9-12 / 14-18 双倍）和缓存命中率"
                       "（命中与未命中差 100 倍以上）都会让同一批实验算出不同数字，复现不出来。"
                       "token 是精确的。").format(tokens["runs"])
@@ -297,12 +334,12 @@ def main() -> None:
         "matrix": matrix,
         # 分布要覆盖两组：要做事来自 D15，不该动来自 D13（不然"不该动"那排全是 0）
         "distribution": build_distribution(
-            pick(d15["自动"]["strong"], auto_tasks, "要做事")
+            pick(action["自动"]["strong"], auto_tasks, "要做事")
             + pick(old["自动"]["strong"], auto_tasks, "不该动"),
-            pick(d15["自动"]["weak"], auto_tasks, "要做事")
+            pick(action["自动"]["weak"], auto_tasks, "要做事")
             + pick(old["自动"]["weak"], auto_tasks, "不该动"), auto_tasks),
         "instruction_following": build_instruction_following(
-            human_tasks, d15["人工"]["strong"], d15["人工"]["weak"]),
+            human_tasks, action["人工"]["strong"], action["人工"]["weak"]),
         "tokens": tokens,
         "trajectories": build_trajectories(),
     }

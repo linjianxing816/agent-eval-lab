@@ -165,6 +165,13 @@ def build_html(data: dict[str, Any]) -> str:
 <h2>二、门禁明细</h2>
 <table><thead><tr><th>项</th><th>实际</th><th>门槛</th><th>结果</th><th>怎么算的</th></tr></thead>
 <tbody>{gate_rows}</tbody></table>
+<div class="legend" style="margin-top:10px;padding:10px 12px;background:#fff;border:1px solid #dfe3e8">
+<strong>门槛公式待复核（不影响本次判定，但结论会变）</strong>：要做事组 gap 是
+「两个比例之差」，它的标准误是 <code>sqrt(p₁(1−p₁)/n + p₂(1−p₂)/n)</code>，
+比单比例的 <code>sqrt(0.25/n)</code> 大 √2 倍。现行门槛用了后者，偏松。
+按前者算，本次门槛应是 <strong>0.105</strong>，gap 0.088 会变成<strong>未过</strong>。
+改不改等评审确认，没自己动。
+</div>
 
 <h2>三、矩阵</h2>
 <table><thead><tr><th>集</th><th>组</th><th>strong</th><th>weak</th><th>gap</th>
@@ -172,6 +179,10 @@ def build_html(data: dict[str, Any]) -> str:
 <tbody>{matrix_rows}</tbody></table>
 <div class="legend">要做事组 gap = p_strong − p_weak（正数=弱 Agent 做不成事）；
 不该动组 gap = p_weak − p_strong（正数=弱 Agent 更保守）。两个数不合并。</div>
+<div class="legend" style="margin-top:10px;padding:10px 12px;background:#fff;border:1px solid #dfe3e8">
+<strong>样本量决定结论可信度</strong>（这一条比 gap 本身重要）：同一指标，
+16 个观测时 gap 0.188、误差 ±0.25；114 个观测时 gap 0.088、误差 ±0.094。
+<strong>误差带比 gap 本身还宽时，那个数没有意义</strong>——不是"效果小"，是"测不出来"。</div>
 
 <h2>四、区分度分布</h2>
 <div class="bars">{bars}</div>

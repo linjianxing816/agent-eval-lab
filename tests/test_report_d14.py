@@ -137,3 +137,60 @@ def test_task_rate_averages_repeats():
     from evalkit.build_report import _task_rates
     rows = [_outcome("t1", True), _outcome("t1", False), _outcome("t1", False)]
     assert _task_rates(rows) == {"t1": 1 / 3}
+
+
+def test_merge_override_drops_stale_records_of_same_task():
+    # 改了 instruction 必须重跑那条；新旧两份都留着会把同一任务算两遍
+    from evalkit.build_report import merge_override
+    base = [_outcome("task-035"), _outcome("task-035"), _outcome("task-036")]
+    fresh = [_outcome("task-035", passed=False)]
+    merged = merge_override(base, fresh)
+    assert len(merged) == 2                      # task-035 旧的 2 条被替换成 1 条
+    assert [o.task_id for o in merged].count("task-035") == 1
+    assert any(o.task_id == "task-036" for o in merged)
+
+
+def test_report_shows_sample_size_caveat():
+    # 样本量说明要进报告：16 个观测 0.188、114 个观测 0.088，误差带比 gap 还宽
+    html = build_html(SAMPLE)
+    assert "样本量决定结论可信度" in html
+    assert "误差带比 gap 本身还宽时" in html
+
+
+def test_trajectories_keep_records_from_different_batches(monkeypatch):
+    # 不同批次 run 号都从 0 开始。按 (task_id, agent, run) 去重会把新记录当旧的跳过，
+    # 实测 task-035 显示成了改动前的失败轨迹。
+    from evalkit import build_report as br
+
+    def fake_load(path):
+        name = path.name
+        if name.startswith("d15_human_strong"):
+            return [_outcome("task-035", passed=False), _outcome("task-035", passed=False)]
+        if name.startswith("d16_human_strong"):
+            return [_outcome("task-035", passed=True)]
+        return []
+
+    monkeypatch.setattr(br, "load_if_exists", fake_load)
+    rows = [r for r in br.build_trajectories() if r["task_id"] == "task-035"]
+    # 旧批次的 2 条作废（instruction 改过了），只留新批次的 1 条
+    assert len(rows) == 1
+    assert rows[0]["badge"] == "通过"
+    assert "第 1 次" in rows[0]["agent"]
+
+
+def test_trajectories_keep_both_batches_when_not_overridden(monkeypatch):
+    # 自动集是"加样本"，两批都要留；按 run 号去重会把第二批全丢掉
+    from evalkit import build_report as br
+
+    def fake_load(path):
+        name = path.name
+        if name == "d15_auto_strong.jsonl":
+            return [_outcome("gen-s1-068")]
+        if name == "d16_auto_strong.jsonl":
+            return [_outcome("gen-s1-068")]
+        return []
+
+    monkeypatch.setattr(br, "load_if_exists", fake_load)
+    rows = [r for r in br.build_trajectories() if r["task_id"] == "gen-s1-068"]
+    assert len(rows) == 2
+    assert [r["agent"].split("·")[1].strip() for r in rows] == ["第 1 次", "第 2 次"]
