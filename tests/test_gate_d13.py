@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from evalkit.diff import _group_of, diff_sets, to_markdown
 from evalkit.discriminate import Outcome
+import pytest
+
 from evalkit.gate import evaluate, gap_threshold
 
 
@@ -10,11 +12,25 @@ def _row(tid, agent, passed, category=None, steps=3):
     return Outcome(tid, agent, 0, True, passed, category, steps, 10, 1)
 
 
-def test_gap_threshold_scales_with_sample_size():
-    # 门槛必须按 N 算，不能写死 0.10
-    assert gap_threshold(150) < gap_threshold(57)
-    assert gap_threshold(150) == 0.082
-    assert gap_threshold(0) == 1.0
+def test_gap_threshold_uses_two_proportion_se():
+    # gap 是两个比例之差，se = sqrt(p1(1-p1)/n + p2(1-p2)/n)，不是单比例的 sqrt(0.25/n)
+    assert gap_threshold(0.5, 0.5, 171) == pytest.approx(0.1082, abs=1e-3)   # 2*sqrt(0.5/171)
+    assert gap_threshold(0.5, 0.5, 150) < gap_threshold(0.5, 0.5, 57)
+    assert gap_threshold(0.5, 0.5, 0) == 1.0
+    # 比单比例公式大 √2 倍（同样的 n 和 p=0.5）
+    assert gap_threshold(0.5, 0.5, 171) == pytest.approx(2 * (0.5 / 171) ** 0.5, abs=1e-4)
+
+
+def test_gap_threshold_depends_on_observed_rates():
+    # p 接近 0 或 1 时方差小，门槛也小——不能用固定的 0.25
+    assert gap_threshold(0.9, 0.9, 100) < gap_threshold(0.5, 0.5, 100)
+
+
+def test_required_n_solves_gap_equals_two_se():
+    from evalkit.gate import required_n
+    need = required_n(0.0877, 0.6433, 0.5556)
+    assert 240 <= need <= 260
+    assert required_n(0, 0.5, 0.5) == 0
 
 
 def test_gate_passes_when_all_ok():

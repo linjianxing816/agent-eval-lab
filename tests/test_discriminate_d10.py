@@ -154,6 +154,7 @@ def test_small_gap_inside_noise_is_not_reported_as_direction():
     report = compare_by_type(strong, weak, tasks)
     row = report["要做事"]
     assert row["runs"] == 22
-    assert row["threshold"] == 0.213
+    # 门槛 = 2*sqrt(p1(1-p1)/n + p2(1-p2)/n)，p1=0.5 p2≈0.455 n=22
+    assert 0.28 < row["threshold"] < 0.33
     assert abs(row["gap"]) < row["threshold"]
-    assert "噪声" in row["direction"]
+    assert "噪声" in row["direction"] and "未达显著" in row["direction"]

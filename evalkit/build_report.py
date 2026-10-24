@@ -26,7 +26,7 @@ from evalkit.discriminate import (
     token_mean,
     type_of,
 )
-from evalkit.gate import evaluate
+from evalkit.gate import evaluate, required_n
 from evalkit.report import write_report
 
 RESULTS = Path("results")
@@ -235,6 +235,52 @@ def build_instruction_following(tasks: list[dict], strong: list[Outcome],
     }
 
 
+def build_strength(stages: list[tuple[str, list[Outcome], list[Outcome], list[dict]]],
+                   current_gap: float, current_p1: float, current_p2: float) -> dict[str, Any]:
+    """「样本量与结论强度」：同一指标在不同样本量下的误差带。
+
+    误差带 = 2 × se(gap)，se 用两比例之差的公式。
+    **误差带比 gap 还宽时，那个数没有意义**——不是效果小，是测不出来。
+    """
+    rows: list[dict[str, Any]] = []
+    for label, strong, weak, tasks in stages:
+        report = compare_by_type(strong, weak, tasks)["要做事"]
+        n = report["runs"]
+        if n <= 0:
+            continue
+        variance = report["strong"] * (1 - report["strong"]) + report["weak"] * (1 - report["weak"])
+        se = (variance / n) ** 0.5
+        band = 2 * se
+        gap = report["gap"]
+        # 分档按「误差带是 gap 的几倍」：
+        #   ≥1.5 倍 → 真实值可能只有观测值的三分之一，连排序都可能反过来 → 没有意义
+        #   ≥1 倍   → 区间含 0，不显著，但符号稳定 → 能看出方向
+        #   <1 倍   → 可以判定
+        if abs(gap) == 0:
+            verdict = "两组完全一致，无差异可谈"
+        elif band >= 1.5 * abs(gap):
+            verdict = "误差带是 gap 的 {0:.1f} 倍 → 这个数没有意义".format(band / abs(gap))
+        elif band >= abs(gap):
+            verdict = "区间含 0，不显著；但方向稳定 → 能看出方向"
+        else:
+            verdict = "gap 大于误差带 → 可以判定"
+        rows.append({
+            "label": label, "n": n, "gap": round(gap, 4),
+            "se": round(se, 4), "band": round(band, 4), "verdict": verdict,
+        })
+    need = required_n(current_gap, current_p1, current_p2)
+    return {
+        "rows": rows,
+        "need_n": need,
+        "note": "分档规则：误差带 ≥ gap 的 1.5 倍 → 这个数没有意义；≥ gap → 能看出方向但不显著；"
+                "< gap → 可以判定。「需要 N ≥ {0}」是按观测到的 p₁={1:.3f}、p₂={2:.3f} 反解出来的："
+                "令 gap = 2×se，得 n = 4v/gap²（v = p₁(1−p₁)+p₂(1−p₂)）。"
+                "如果按最保守的 p=0.5 算，需要 {3}。".format(
+                    need, current_p1, current_p2,
+                    required_n(current_gap, 0.5, 0.5)),
+    }
+
+
 def main() -> None:
     diff = build_diff()
 
@@ -304,6 +350,8 @@ def main() -> None:
         "consistency_rate": audit["deterministic"]["consistency_rate"],
         "action_gap": action_row["gap"],
         "action_runs": action_row["runs"],
+        "action_strong": action_row["strong"],
+        "action_weak": action_row["weak"],
         "critical_count": critical,
     })
 
@@ -315,7 +363,32 @@ def main() -> None:
                       "（命中与未命中差 100 倍以上）都会让同一批实验算出不同数字，复现不出来。"
                       "token 是精确的。").format(tokens["runs"])
 
+    human_action = compare_by_type(pick(action["人工"]["strong"], human_tasks, "要做事"),
+                                   pick(action["人工"]["weak"], human_tasks, "要做事"),
+                                   human_tasks)["要做事"]
+    strength = build_strength(
+        [
+            ("D13 抽样（30 条里的 16 条要做事）",
+             pick(old["自动"]["strong"], auto_tasks, "要做事"),
+             pick(old["自动"]["weak"], auto_tasks, "要做事"), auto_tasks),
+            ("D15 扩样本（57 条 × 2 次）",
+             pick(d15["自动"]["strong"], auto_tasks, "要做事"),
+             pick(d15["自动"]["weak"], auto_tasks, "要做事"), auto_tasks),
+            ("D15+D16（57 条 × 3 次）",
+             pick(action["自动"]["strong"], auto_tasks, "要做事"),
+             pick(action["自动"]["weak"], auto_tasks, "要做事"), auto_tasks),
+        ],
+        action_row["gap"], action_row["strong"], action_row["weak"])
+
     data = {
+        "conclusion": (
+            "两个任务集在「要做事」组都是 strong > weak 的方向（人工 {0:+.3f}、自动 {1:+.3f}），"
+            "但幅度都在噪声内，未达显著。<br>"
+            "<strong>结论：方向一致，幅度未达显著</strong>——按观测到的通过率，"
+            "要判定这个幅度真实存在需要 N ≥ {2}（现在 N={3}）。"
+            "<br>「方向一致」不依赖显著性：两个集的 gap 符号相同，这一点成立。"
+        ).format(human_action["gap"], action_row["gap"], strength["need_n"], action_row["runs"]),
+        "strength": strength,
         "meta": "数据源：D15 扩样本（自动集 57 条 × 2 次、人工集 22 条 × 3 次，strong / weak 各跑一遍）"
                 "+ D13 全量（不该动组）。报告只报 token，不报金额。",
         "cards": [

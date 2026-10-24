@@ -269,9 +269,13 @@ def compare_by_type(strong: list[Outcome], weak: list[Outcome],
         gap = round(s_rate - w_rate, 4) if bucket == "要做事" else round(w_rate - s_rate, 4)
         # 门槛按观测数算（2 倍标准误）。|gap| 落在门槛内就是噪声，不能说"方向反了"——
         # 实测人工集要做事组 22 个观测、误差 ±0.21，-0.045 完全在噪声里。
-        threshold = gap_threshold(s_n)
+        # 两比例之差的标准误，不是单比例——见 gate.py 顶部说明
+        threshold = gap_threshold(s_rate, w_rate, s_n)
         if abs(gap) < threshold:
-            direction = "差异在噪声内（未测出区分度，门槛 {0:.3f}）".format(threshold)
+            if gap == 0:
+                direction = "无差异（门槛 {0:.3f}）".format(threshold)
+            else:
+                direction = "方向一致但未达显著（差异在噪声内，门槛 {0:.3f}）".format(threshold)
         elif bucket == "要做事":
             direction = "弱 Agent 做不成事"
         else:

@@ -150,11 +150,11 @@ def test_merge_override_drops_stale_records_of_same_task():
     assert any(o.task_id == "task-036" for o in merged)
 
 
-def test_report_shows_sample_size_caveat():
-    # 样本量说明要进报告：16 个观测 0.188、114 个观测 0.088，误差带比 gap 还宽
+def test_report_has_sample_strength_section():
+    # 「样本量与结论强度」要独立成节：误差带比 gap 还宽时，那个数没有意义
     html = build_html(SAMPLE)
-    assert "样本量决定结论可信度" in html
-    assert "误差带比 gap 本身还宽时" in html
+    assert "样本量与结论强度" in html
+    assert "不是效果小，是样本不够" in html
 
 
 def test_trajectories_keep_records_from_different_batches(monkeypatch):
@@ -194,3 +194,24 @@ def test_trajectories_keep_both_batches_when_not_overridden(monkeypatch):
     rows = [r for r in br.build_trajectories() if r["task_id"] == "gen-s1-068"]
     assert len(rows) == 2
     assert [r["agent"].split("·")[1].strip() for r in rows] == ["第 1 次", "第 2 次"]
+
+
+def test_strength_tiers_follow_error_band_ratio():
+    # 误差带 / gap ≥1.5 → 没有意义；≥1 → 能看出方向；<1 → 可以判定
+    from evalkit.build_report import build_strength
+    from evalkit.discriminate import Outcome
+
+    def rows(pass_rate, n, tid):
+        k = round(pass_rate * n)
+        return [Outcome(tid, "strong", i, True, i < k, None, 3, 10, 1) for i in range(n)]
+
+    tasks = [{"id": "task-035", "scenario": "正常"}]
+    tiny = build_strength([("n=16", rows(0.625, 16, "task-035"), rows(0.438, 16, "task-035"), tasks)],
+                          0.1875, 0.625, 0.438)
+    assert "没有意义" in tiny["rows"][0]["verdict"]
+    assert tiny["rows"][0]["band"] > 1.5 * tiny["rows"][0]["gap"]
+
+    big = build_strength([("n=400", rows(0.62, 400, "task-035"), rows(0.50, 400, "task-035"), tasks)],
+                         0.12, 0.62, 0.50)
+    assert "可以判定" in big["rows"][0]["verdict"]
+    assert big["rows"][0]["band"] < big["rows"][0]["gap"]
