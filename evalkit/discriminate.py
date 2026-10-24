@@ -1,0 +1,158 @@
+"""弱 Agent + 区分度测量（D10 / D11）。
+
+【弱 Agent 怎么削弱：删掉 `get_order`】
+三条原则逐条对照：
+
+1. **绕不过去**：`get_order` 是拿到 `amount` 和 `status` 的唯一入口。
+   `get_user` 只给 `name` / `vip`，`calc_refund` 必须先知道订单号且内部会读状态——
+   但算出来的金额也拿不回来（它返回 refund_amount，嗯，这条要单独说，见下）。
+   所以拿不到金额和状态，就没有替代路径。
+
+2. **影响能力不是运气**：金额只能从五个值里猜（0.01 / 88.8 / 158.0 / 299.0 / 999999.0），
+   猜中概率接近 0；状态不知道就没法判断该不该先取消发货。这是**信息缺失**导致的系统性错误，
+   不是加温度那种随机波动。
+
+3. **只改一处**：工具集少一个，system prompt 一个字没改。归因干净。
+
+**已知代价**（报告里要写）：有 40% 的任务断言是"状态没变"，弱 Agent 什么都不做也能过。
+所以它的通过率会被这类任务抬高，区分度被低估——这是任务设计带来的，不是测量误差。
+"""
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from evalkit.agent.loop import run_task
+from evalkit.agent.strong import STRONG_AGENT, SYSTEM_PROMPT
+from evalkit.client import ChatError, ModelClient
+from evalkit.env.sandbox import Sandbox
+from evalkit.env.state import EnvState
+from evalkit.env.tools import TOOL_SCHEMAS
+from evalkit.judge import judge_task
+
+WEAK_TOOLS = [t for t in TOOL_SCHEMAS if t["function"]["name"] != "get_order"]
+WEAK_AGENT: dict[str, Any] = {
+    "name": "weak",
+    "system_prompt": SYSTEM_PROMPT,      # 一个字不改，只少一个工具
+    "tools": WEAK_TOOLS,
+}
+AGENTS = {"strong": STRONG_AGENT, "weak": WEAK_AGENT}
+
+
+@dataclass(frozen=True)
+class Outcome:
+    task_id: str
+    agent: str
+    run: int
+    ok: bool
+    passed: bool
+    category: str | None
+    steps: int
+    prompt_tokens: int
+    completion_tokens: int
+
+    @property
+    def tokens(self) -> int:
+        return self.prompt_tokens + self.completion_tokens
+
+
+def run_one(task: dict, agent: dict, client: ModelClient, run_index: int) -> Outcome:
+    state = EnvState(task.get("initial_state"))
+    sandbox = Sandbox(state)
+    max_steps = int((task.get("constraints") or {}).get("max_steps") or 12)
+    try:
+        result = run_task(
+            client, sandbox,
+            instruction=task["instruction"],
+            system_prompt=agent["system_prompt"],
+            tools=agent["tools"],
+            max_steps=max_steps,
+        )
+        verdict = judge_task(task, state.data, result, sandbox.trajectory())
+    except ChatError as exc:
+        return Outcome(task["id"], agent["name"], run_index, False, False, "request_error", 0, 0, 0)
+    except Exception:                              # noqa: BLE001 - 崩了要记，不能中断整批
+        return Outcome(task["id"], agent["name"], run_index, False, False, "crash", 0, 0, 0)
+    return Outcome(
+        task_id=task["id"], agent=agent["name"], run=run_index, ok=True,
+        passed=bool(verdict["passed"]), category=verdict.get("category"),
+        steps=result.steps,
+        prompt_tokens=sum(result.per_step_tokens),
+        completion_tokens=sum(result.per_step_completion_tokens),
+    )
+
+
+def run_batch(tasks: list[dict], agent: dict, client: ModelClient,
+              repeats: int = 1, log: Path | None = None) -> list[Outcome]:
+    """串行跑。崩一条不中断，记 ok=False。"""
+    outcomes: list[Outcome] = []
+    for index, task in enumerate(tasks, 1):
+        for run_index in range(repeats):
+            outcomes.append(run_one(task, agent, client, run_index))
+        if log is not None:
+            log.write_text(
+                "\n".join(json.dumps(o.__dict__, ensure_ascii=False) for o in outcomes) + "\n",
+                encoding="utf-8",
+            )
+    return outcomes
+
+
+def pass_rate(outcomes: list[Outcome]) -> float:
+    return round(sum(1 for o in outcomes if o.passed) / len(outcomes), 4) if outcomes else 0.0
+
+
+def summarize_agent(outcomes: list[Outcome]) -> dict[str, Any]:
+    total = len(outcomes)
+    failed = [o for o in outcomes if not o.passed]
+    distribution: dict[str, int] = {}
+    for o in failed:
+        key = o.category or ("request_error" if not o.ok else "unknown")
+        distribution[key] = distribution.get(key, 0) + 1
+    return {
+        "runs": total,
+        "passed": total - len(failed),
+        "pass_rate": pass_rate(outcomes),
+        "failure_distribution": dict(sorted(distribution.items(), key=lambda kv: -kv[1])),
+        "avg_steps": round(sum(o.steps for o in outcomes) / total, 2) if total else 0.0,
+        "tokens": sum(o.tokens for o in outcomes),
+        "crashes": sum(1 for o in outcomes if not o.ok),
+    }
+
+
+def per_task_diff(strong: list[Outcome], weak: list[Outcome]) -> list[dict]:
+    """单任务区分度。**只回答"多少条任务有效"，不设门槛**——
+    repeat 小的时候单任务误差 ±0.38，比任何门槛都大，算出来是噪声。"""
+    def by_task(outcomes: list[Outcome]) -> dict[str, float]:
+        grouped: dict[str, list[Outcome]] = {}
+        for o in outcomes:
+            grouped.setdefault(o.task_id, []).append(o)
+        return {tid: round(sum(1 for o in rs if o.passed) / len(rs), 4) for tid, rs in grouped.items()}
+
+    s_map, w_map = by_task(strong), by_task(weak)
+    rows = [
+        {"task_id": tid, "strong": s_map[tid], "weak": w_map[tid],
+         "diff": round(s_map[tid] - w_map[tid], 4)}
+        for tid in s_map if tid in w_map
+    ]
+    rows.sort(key=lambda r: -r["diff"])
+    return rows
+
+
+def compare(sets: dict[str, dict[str, list[Outcome]]]) -> dict[str, Any]:
+    """sets: {任务集名: {"strong": [...], "weak": [...]}}"""
+    report: dict[str, Any] = {}
+    for name, pair in sets.items():
+        strong_sum = summarize_agent(pair["strong"])
+        weak_sum = summarize_agent(pair["weak"])
+        rows = per_task_diff(pair["strong"], pair["weak"])
+        report[name] = {
+            "strong": strong_sum,
+            "weak": weak_sum,
+            "gap": round(strong_sum["pass_rate"] - weak_sum["pass_rate"], 4),
+            "effective_tasks": sum(1 for r in rows if r["diff"] > 0),
+            "task_count": len(rows),
+            "per_task": rows,
+        }
+    return report

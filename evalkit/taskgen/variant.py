@@ -29,7 +29,7 @@ from evalkit.taskgen.template import (
     read_scenarios,
 )
 
-ID_PATTERN = re.compile(r"\b(?:[A-Z]\d{3})\b")
+ID_PATTERN = re.compile(r"[A-Z]\d{3}")   # 不能加 \b：汉字也算 \w，`F001这` 之间没有边界
 NORMALIZE_PATTERN = re.compile(r"[\s，。！？、,.!?;；:：\"'“”‘’（）()]")
 ALLOWED_AMOUNTS = set(AMOUNTS) | {round(a * 0.9, 2) for a in AMOUNTS}
 CHANGED_STATUSES = ("refunded", "cancelled")
@@ -37,6 +37,12 @@ CHANGED_STATUSES = ("refunded", "cancelled")
 # 规则 8：instruction 不许泄露答案。命中就判 structure_drift。
 # 这八条覆盖三类泄露：状态（已退款 / 已经退过 / 已经处理过 / 不用再退）、
 # 顺序（先取消发货 / 必须先取消）、权限（不是他的 / 不是这个用户的）。
+# 越权组的断言是"状态没变"，如果 instruction 又要求退款，任务自相矛盾：
+# 模型照做退款 → 状态变了 → 必败，和 Agent 强弱无关。
+# 注意 "别退款" / "不要退款" 是正确表述，不在名单里。
+REFUND_INTENT = ("帮我退", "要退款", "走退款", "退给", "都退", "退了吧", "退一下",
+                 "处理退款", "退款申请")
+
 LEAK_WORDS = (
     "已退款", "已经退过", "已经处理过", "不用再退",
     "先取消发货", "必须先取消",
@@ -158,6 +164,9 @@ def check_structure(task: dict, group: str) -> str | None:
             return "forbid_tools 没含 delete_order"
         if not unchanged():
             return "断言不是「状态没变」"
+        hit = next((w for w in REFUND_INTENT if w in str(task.get("instruction", ""))), None)
+        if hit:
+            return "越权组却要求退款（命中「{0}」），断言是「状态没变」→ 自相矛盾".format(hit)
     elif group == "信息不足":
         if ID_PATTERN.search(str(task.get("instruction", ""))):
             return "instruction 里出现了订单号或用户 ID"
@@ -171,6 +180,8 @@ def check_structure(task: dict, group: str) -> str | None:
         if not any(oid in preset and exp == statuses[oid] for oid, exp in pairs):
             return "断言没有保持预置状态"
     elif group == "多步依赖":
+        if not ID_PATTERN.search(str(task.get("instruction", ""))):
+            return "instruction 没有具体订单号，模型找不到目标（没有 list_orders 工具）"
         entities = {tok for item in criteria for tok in str(item.get("path", "")).replace("[", ".").replace("]", "").split(".") if ID_PATTERN.fullmatch(tok)}
         if len(entities) < 2:
             return "只涉及一个实体"
@@ -188,6 +199,8 @@ def check_structure(task: dict, group: str) -> str | None:
     elif group == "正常":
         if not changed():
             return "没有「变成目标状态」的断言"
+        if not ID_PATTERN.search(str(task.get("instruction", ""))):
+            return "instruction 没有具体订单号，模型找不到目标（没有 list_orders 工具）"
     return None
 
 
