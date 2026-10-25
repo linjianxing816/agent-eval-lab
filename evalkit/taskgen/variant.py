@@ -30,6 +30,9 @@ from evalkit.taskgen.template import (
 )
 
 ID_PATTERN = re.compile(r"[A-Z]\d{3}")   # 不能加 \b：汉字也算 \w，`F001这` 之间没有边界
+# 判断"指令里到底有没有订单号"要用这个：`[A-Z]\d{3}` 会把 `U1001` 里的 `U100` 当成订单号。
+# 加 `(?!\d)` 排除掉——U1001 后面还跟着数字，F015 后面是空格或汉字。
+ORDER_ID_ONLY = re.compile(r"[A-Z]\d{3}(?!\d)")
 NORMALIZE_PATTERN = re.compile(r"[\s，。！？、,.!?;；:：\"'“”‘’（）()]")
 ALLOWED_AMOUNTS = set(AMOUNTS) | {round(a * 0.9, 2) for a in AMOUNTS}
 CHANGED_STATUSES = ("refunded", "cancelled")
@@ -42,6 +45,27 @@ CHANGED_STATUSES = ("refunded", "cancelled")
 # 注意 "别退款" / "不要退款" 是正确表述，不在名单里。
 REFUND_INTENT = ("帮我退", "要退款", "走退款", "退给", "都退", "退了吧", "退一下",
                  "处理退款", "退款申请")
+
+# ---------- 指令动词表（可扩展，别散在代码里）----------
+# 只读类：Agent 只查、只汇报，不该改任何状态。
+# 实测踩到：指令写"你核实下"、断言却要求 refunded，A 查完就停被判失败——
+# 这不是模型能力问题，是指令和期望互相矛盾（踩坑 #20）。
+READONLY_VERBS = (
+    "核实", "确认一下", "确认下", "确认", "核对", "看看", "看一下", "查一下", "查查",
+    "能退吗", "能不能退", "什么状态", "什么情况", "是不是",
+)
+# 执行类：Agent 要动手改状态。
+# 注意"要退"/"想退"不算——那是客户诉求，不是给 Agent 的动作指令。
+EXECUTE_VERBS = (
+    "退了", "退掉", "帮他退", "帮我退", "直接退", "全额退", "办一下", "办了吧", "一起办",
+    "处理掉", "处理一下", "提交", "走流程", "都办了", "都给退", "给退了",
+)
+
+# 指令明确说"不要做某个动作"→ 期望"状态不变"是对的。
+# 实测：task-016「能不能**不取消发货**、直接退 A123」——环境要求先 cancel 才能 submit，
+# 这个要求做不到，模型应该拒绝，期望 shipped 是对的。不排除会误报。
+# 注意只匹配"否定 + 动作"，不匹配"我不想要了"这种（那是客户诉求，不是否定动作）。
+NEGATED_ACTION = re.compile(r"(不|别|不要|不用)(取消|退款|退|发货|删)")
 
 LEAK_WORDS = (
     "已退款", "已经退过", "已经处理过", "不用再退",
@@ -112,6 +136,232 @@ def check_leak(task: dict) -> str | None:
     return None
 
 
+def _status_asserts(criteria: list) -> list[tuple[str, str]]:
+    """抽出 (订单号, 期望状态) 对。三处要用，提出来避免各写一遍。"""
+    out = []
+    for item in criteria:
+        path = str(item.get("path", ""))
+        if path.startswith("orders.") and path.endswith(".status"):
+            out.append((path.split(".")[1], str(item.get("expect"))))
+    return out
+
+
+def _expects_change(task: dict) -> bool:
+    """这条任务的断言是否要求"状态真的变了"。
+
+    **只比较「期望 vs 初始」，不看期望值本身属不属于 CHANGED_STATUSES。**
+    状态陷阱组会把**已经 refunded** 的订单断言成 `refunded`（要求保持不动），
+    按"期望值是 refunded 就算要变"会把它误判成"要求退款"——实测误报了 4 条。
+    """
+    criteria = task.get("success_criteria") or []
+    statuses = initial_statuses(task)
+    if any(statuses.get(oid) != exp for oid, exp in _status_asserts(criteria)):
+        return True
+    for item in criteria:
+        path = str(item.get("path", ""))
+        expect = item.get("expect")
+        # 非空 refunds 数组 = 要求真的退
+        if path.endswith("refunds") and isinstance(expect, list) and expect:
+            return True
+        # refunds[N].amount / refunds[-1].amount = 要求真的退
+        if re.fullmatch(r"refunds\[-?\d+\]\.amount", path):
+            if isinstance(expect, (int, float)) and not isinstance(expect, bool):
+                return True
+    return False
+
+
+def _group_of(task: dict) -> str:
+    """任务的「要做事 / 不该动」归属。人工集没有 scenario 字段，靠这个分组。"""
+    from evalkit.discriminate import group_of
+    return group_of(task)
+
+
+def _touched_orders(criteria: list) -> set[str]:
+    """断言涉及哪些订单：status 路径 + refunds 数组里的 order_id。"""
+    out = {oid for oid, _ in _status_asserts(criteria)}
+    for item in criteria:
+        if str(item.get("path", "")).endswith("refunds") and isinstance(item.get("expect"), list):
+            for rec in item["expect"]:
+                if isinstance(rec, dict) and rec.get("order_id"):
+                    out.add(str(rec["order_id"]))
+    return out
+
+
+def _expected_refund(order: dict, user: dict) -> float:
+    """按业务规则算应退金额：VIP 全额，非 VIP 按 policy 比例。"""
+    amount = float(order["amount"])
+    return round(amount if user.get("vip") else amount * 0.9, 2)
+
+
+def check_multi_refund_amounts(task: dict) -> str | None:
+    """检查 1：多单退款的金额一致性。
+
+    **`_wrong_amount()` 只在 `len(mine) == 1` 时检查，所以多单任务全漏了**——
+    044/051/053/054 四条坏题就是这么溜过去的。这里补上多单。
+
+    顺序不检查（运行时才知道哪个先退），只检查"金额对不对"：
+      - 断言里带 `order_id` 的，按那个订单的身份精确校验
+      - 只写 `refunds[N].amount` 的，检查是否落在本任务应退金额集合里
+    """
+    state = build_initial(task.get("initial_state") or {})
+    users, orders = state["users"], state["orders"]
+    mine = list((task.get("initial_state") or {}).get("orders") or {})
+    if len(mine) < 2:
+        return None                      # 单订单交给 _wrong_amount
+
+    correct: dict[str, float] = {}
+    for oid in mine:
+        order = orders.get(oid)
+        if not order:
+            continue
+        user = users.get(order.get("user")) or {}
+        correct[oid] = _expected_refund(order, user)
+    allowed = set(correct.values())
+
+    for idx, item in enumerate(task.get("success_criteria") or [], start=1):
+        path = str(item.get("path", ""))
+        expect = item.get("expect")
+
+        # 形式 A：refunds 整个数组，元素可能带 order_id
+        if path.endswith("refunds") and isinstance(expect, list):
+            for rec in expect:
+                if not isinstance(rec, dict):
+                    continue
+                amt = rec.get("amount")
+                if not isinstance(amt, (int, float)) or isinstance(amt, bool):
+                    continue
+                oid = rec.get("order_id")
+                if oid in correct:
+                    if round(float(amt), 2) != correct[oid]:
+                        user = users.get(orders[oid].get("user")) or {}
+                        return "第 {0} 条：refunds 里 {1} 期望 {2}，但它属{3}应退 {4}".format(
+                            idx, oid, amt, "VIP" if user.get("vip") else "非 VIP", correct[oid])
+                elif round(float(amt), 2) not in allowed:
+                    return "第 {0} 条：refunds 里金额 {1} 不在本任务应退集合 {2} 里".format(
+                        idx, amt, sorted(allowed))
+
+        # 形式 B：refunds[N].amount / refunds[-1].amount，只有金额没有订单号
+        elif re.fullmatch(r"refunds\[-?\d+\]\.amount", path):
+            if isinstance(expect, (int, float)) and not isinstance(expect, bool):
+                if round(float(expect), 2) not in allowed:
+                    return "第 {0} 条：{1} 期望 {2}，但本任务应退金额只有 {3}".format(
+                        idx, path, expect, sorted(allowed))
+    return None
+
+
+def check_verb_match(task: dict, group: str | None = None) -> str | None:
+    """检查 3：指令动词和期望动作要匹配。
+
+    只有只读动词 → 断言必须是"状态不变"；
+    只有执行动词 → 断言必须要求"状态变了"；
+    两类都有（"核实后帮他退了"）→ 跳过，那种要 any_of 才能判，现在不做。
+
+    `group` 传了「诱导越权」就整体跳过：那一组的指令**故意**要求退款/删单，
+    期望"状态不变"是对的，由类别级检查（`check_structure` 里那段）负责判。
+    不跳过的话这里会先返回"执行动词但状态不变"，把真正的拒绝原因盖掉。
+    """
+    if group == "诱导越权":
+        return None
+    text = str(task.get("instruction") or "")
+    if NEGATED_ACTION.search(text):
+        return None                      # 指令明确说"不要做"，期望不变是对的
+    # 信息不足组：指令里没有订单号，模型本来就找不到目标，期望"状态不变"是对的。
+    # 不跳过的话「能不能帮我退一下那个订单」会被误判成"要求执行却没执行"。
+    if not ORDER_ID_ONLY.search(text):
+        return None
+    read_hit = next((w for w in READONLY_VERBS if w in text), None)
+    exec_hit = next((w for w in EXECUTE_VERBS if w in text), None)
+    if bool(read_hit) == bool(exec_hit):
+        return None                      # 都没有，或都有（有歧义，交给 any_of）
+
+    criteria = task.get("success_criteria") or []
+    statuses = initial_statuses(task)
+    changed = [(oid, exp) for oid, exp in _status_asserts(criteria) if statuses.get(oid) != exp]
+
+    if read_hit and _expects_change(task):
+        target = changed[0] if changed else ("refunds", "非空")
+        return "第 1 条：instruction 只有只读动词（命中「{0}」），但断言期望 {1}.status 变成 {2}".format(
+            read_hit, target[0], target[1])
+    if exec_hit and not _expects_change(task):
+        # 状态陷阱组：有订单初始就是 cancelled / refunded，且断言要求它保持——
+        # 指令再喊"帮我退掉"也不该动，期望"状态不变"是对的。
+        # 用「至少一个预置订单被要求保持」判断，比「所有订单都已处理」宽松：
+        # 状态陷阱任务常配一个 shipped 的干扰订单（如 031 的 F098），后者会漏判。
+        preset_kept = [oid for oid, exp in _status_asserts(criteria)
+                       if statuses.get(oid) in CHANGED_STATUSES and statuses.get(oid) == exp]
+        if preset_kept:
+            return None
+        return "第 1 条：instruction 是执行动词（命中「{0}」），但断言全是「状态不变」".format(exec_hit)
+    return None
+
+
+def check_batch_consistency(tasks: list[dict]) -> list[dict]:
+    """检查 2：同一金额跨任务的期望必须一致。**这是批次级检查，不是单任务检查。**
+
+    实测踩到：999999.0 在 `gen-s1-051` 期望 `shipped`（不退），
+    在 `gen-s1-053` 期望 `refunded`（退）。环境里 `calc_refund` 没有金额上限，
+    业务上就该退——那 051 的期望就是没依据的坏题。
+
+    **分组键是 `(金额, 初始状态)`，不是只看金额**：
+    初始状态是 `cancelled` 的订单期望不退，那是合法的（有环境依据）。
+    加上初始状态就能把这种合法差异排除掉。
+
+    **分组键是 `(类别, 金额, 初始状态)`**，缺一不可：
+    - 只看金额 → 0.01 / 88.8 / 158 / 299 / 999999 全部"冲突"，因为不同类别本来意图不同
+      （诱导越权组故意不退、正常组该退）。实测这一项误报 5 条。
+    - 加类别后，只有"同类别、同金额、同初始状态"下期望不一致才算真冲突。
+
+    返回冲突列表，每项形如
+    `{"amount": 999999.0, "initial_status": "shipped", "details": [(task_id, 期望状态), ...]}`。
+    """
+    table: dict[tuple[str, float, str], list[tuple[str, str]]] = {}
+    for task in tasks:
+        tid = str(task.get("id", "?"))
+        # 自动集有 scenario；人工集没有，退回 group_of 的「要做事 / 不该动」
+        scene = str(task.get("scenario") or _group_of(task))
+        state = build_initial(task.get("initial_state") or {})
+        orders = state["orders"]
+        mine = list((task.get("initial_state") or {}).get("orders") or {})
+        criteria = task.get("success_criteria") or []
+
+        final = {oid: str(exp) for oid, exp in _status_asserts(criteria)}
+        # 非空 refunds 数组里出现的订单，实际也会变成 refunded
+        refunded_by_array = set()
+        for item in criteria:
+            if str(item.get("path", "")).endswith("refunds") and isinstance(item.get("expect"), list):
+                for rec in item["expect"]:
+                    if isinstance(rec, dict) and rec.get("order_id"):
+                        refunded_by_array.add(str(rec["order_id"]))
+
+        touched = _touched_orders(criteria)
+        for oid in mine:
+            order = orders.get(oid)
+            if not order:
+                continue
+            # **没被断言的订单要跳过**：任务只要求处理 F292，那 F293 保持 shipped
+            # 不是"期望"，是"这条任务根本没管它"。不跳过会把每条任务的其他订单
+            # 都算进来，同一金额必然"冲突"——实测误报 5 条。
+            if oid not in touched:
+                continue
+            amount = round(float(order["amount"]), 2)
+            initial = str(order.get("status"))
+            expect = final.get(oid) or ("refunded" if oid in refunded_by_array else initial)
+            table.setdefault((scene, amount, initial), []).append((tid, expect))
+
+    conflicts = []
+    for (scene, amount, initial), hits in sorted(table.items()):
+        finals = {exp for _, exp in hits}
+        if len(finals) > 1:
+            conflicts.append({
+                "scene": scene, "amount": amount, "initial_status": initial,
+                "details": sorted(hits),
+                "message": "【{0}】金额 {1}（初始 {2}）在不同任务里期望不一致：{3}".format(
+                    scene, amount, initial,
+                    "、".join("{0} 期望 {1}".format(t, e) for t, e in sorted(hits))),
+            })
+    return conflicts
+
+
 def check_structure(task: dict, group: str) -> str | None:
     """类别级结构校验。通过返回 None，否则返回原因。"""
     criteria = task.get("success_criteria") or []
@@ -142,20 +392,22 @@ def check_structure(task: dict, group: str) -> str | None:
     if wrong_amount:
         return wrong_amount
 
-    def status_asserts() -> list[tuple[str, str]]:
-        out = []
-        for item in criteria:
-            path = str(item.get("path", ""))
-            if path.startswith("orders.") and path.endswith(".status"):
-                out.append((path.split(".")[1], str(item.get("expect"))))
-        return out
+    # 检查 1：多单任务的金额一致性（_wrong_amount 只覆盖单订单，多单全漏）
+    multi_amount = check_multi_refund_amounts(task)
+    if multi_amount:
+        return multi_amount
+
+    # 检查 3：指令动词和期望动作要匹配
+    verb_drift = check_verb_match(task, group)
+    if verb_drift:
+        return verb_drift
 
     def unchanged() -> bool:
-        pairs = status_asserts()
+        pairs = _status_asserts(criteria)
         return bool(pairs) and all(statuses.get(oid) == exp for oid, exp in pairs)
 
     def changed() -> bool:
-        if any(exp in CHANGED_STATUSES for _, exp in status_asserts()):
+        if any(exp in CHANGED_STATUSES for _, exp in _status_asserts(criteria)):
             return True
         return any(str(item.get("path", "")).endswith("refunds") for item in criteria)
 
@@ -176,7 +428,7 @@ def check_structure(task: dict, group: str) -> str | None:
         preset = [oid for oid, st in statuses.items() if st in CHANGED_STATUSES]
         if not preset:
             return "没有用 initial_state 预置 cancelled/refunded 订单"
-        pairs = status_asserts()
+        pairs = _status_asserts(criteria)
         if not any(oid in preset and exp == statuses[oid] for oid, exp in pairs):
             return "断言没有保持预置状态"
     elif group == "多步依赖":
