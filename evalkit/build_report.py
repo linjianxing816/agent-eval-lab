@@ -309,9 +309,41 @@ def build_perf(action: dict[str, dict[str, list[Outcome]]]) -> dict[str, Any] | 
     llm_ms = steps * e2e
     ratio = llm_ms / tool_ms if tool_ms else 0.0
 
+    # TTFT 归因：同一个 prompt 去掉工具 schema 再测 10 次（scripts/ttft_attrib.py）
+    attrib = None
+    attrib_path = RESULTS / "ttft_attrib.json"
+    tokens_path = RESULTS / "ttft_tokens.json"
+    if attrib_path.exists() and tokens_path.exists():
+        bare = json.loads(attrib_path.read_text(encoding="utf-8"))["without_tools"]
+        counts = json.loads(tokens_path.read_text(encoding="utf-8"))
+        bare_ttft = bare["ttft"]["p50"]
+        n_with = counts.get("with_tools_prompt_tokens") or 0
+        n_without = counts.get("without_tools_prompt_tokens") or 0
+        delta_ttft = ttft - bare_ttft
+        delta_tokens = max(n_with - n_without, 1)
+        attrib = {
+            "with_tools_ttft": round(ttft, 1), "with_tools_tokens": n_with,
+            "without_tools_ttft": round(bare_ttft, 1), "without_tools_tokens": n_without,
+            "delta_ttft": round(delta_ttft, 1), "delta_tokens": delta_tokens,
+            "ms_per_1k": round(delta_ttft / delta_tokens * 1000, 1),
+            "baseline_share": round(bare_ttft / ttft * 100, 1),
+            "prefill_share": round(delta_ttft / ttft * 100, 1),
+        }
+
     if share >= 50:
-        bottleneck = ("首 token 慢（占端到端 {0:.0f}%）：瓶颈在排队/网络，"
-                      "不是模型解码。要提速得从连接复用、降低输入长度、错峰入手。".format(share))
+        if attrib:
+            bottleneck = (
+                "首 token 慢（占端到端 {0:.0f}%），再拆一层：其中 <strong>{1:.0f} ms 是基线</strong>"
+                "（排队/连接，去掉工具 schema 也还在），<strong>{2:.0f} ms 是处理多出来的 {3} 个输入 token</strong>"
+                "（约 {4:.0f} ms / 千 token）。<br>"
+                "→ prefill 占 {5:.0f}%、基线占 {6:.0f}%。<strong>缩短输入有用，但省不到一半</strong>；"
+                "真正的瓶颈是排队/连接，优化方向是连接复用、错峰、换更近的接入点。"
+            ).format(share, attrib["without_tools_ttft"], attrib["delta_ttft"],
+                     attrib["delta_tokens"], attrib["ms_per_1k"],
+                     attrib["prefill_share"], attrib["baseline_share"])
+        else:
+            bottleneck = ("首 token 慢（占端到端 {0:.0f}%）：瓶颈在排队/网络，"
+                          "不是模型解码。要提速得从连接复用、降低输入长度、错峰入手。".format(share))
     else:
         bottleneck = ("每 token 慢（首 token 只占 {0:.0f}%，其余 {1:.0f}% 是逐 token 生成）："
                       "瓶颈在解码速度。输出越长越慢，所以要提速得压输出长度"
@@ -327,6 +359,7 @@ def build_perf(action: dict[str, dict[str, list[Outcome]]]) -> dict[str, Any] | 
 
     return {
         "latency": latency,
+        "attribution": attrib,
         "concurrency": raw.get("concurrency") or [],
         "steps": round(steps, 2),
         "tool_ms": round(tool_ms, 3),
@@ -477,6 +510,14 @@ def main() -> None:
         "perf": build_perf(action),
         "trajectories": build_trajectories(),
     }
+    # 平台（server/app.py）从这份 json 读矩阵和门禁，不重新算一遍——
+    # 重新算就意味着"报告里那个数"和"平台里那个数"是两份数据，迟早对不上
+    # 轨迹不导出：1.3MB 里 99% 是轨迹，平台用不到（它现场跑任务）。
+    # 去掉之后这份 json 只有几十 KB，浏览器打开实验详情不会卡。
+    platform_view = {k: v for k, v in data.items() if k != "trajectories"}
+    platform_view["trajectory_count"] = len(data.get("trajectories") or [])
+    (RESULTS / "report_data.json").write_text(
+        json.dumps(platform_view, ensure_ascii=False, indent=2), encoding="utf-8")
     path = write_report(data, RESULTS / "report.html")
     print("门禁:", gate["status"], "| 未过:", gate["failed"] or "无")
     for row in matrix:

@@ -1,0 +1,225 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>LLM Agent 评测平台</title>
+<style>
+:root{--ink:#1a1a1a;--sub:#5b6470;--line:#dfe3e8;--bg:#f7f8fa;--card:#fff;
+--ok:#0a7f3f;--bad:#b3261e;--warn:#8a5a00;--accent:#1f5fbf}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);
+font:14px/1.65 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+.wrap{max-width:1180px;margin:0 auto;padding:24px 20px 60px}
+h1{font-size:21px;margin:0 0 4px}
+h2{font-size:15px;margin:26px 0 10px;padding-bottom:6px;border-bottom:1px solid var(--line)}
+.mono,.num{font-family:ui-monospace,SFMono-Regular,Consolas,monospace;font-variant-numeric:tabular-nums}
+.meta{color:var(--sub);font-size:12px;margin-bottom:16px}
+table{width:100%;border-collapse:collapse;background:var(--card);font-size:13px}
+th,td{border:1px solid var(--line);padding:6px 10px;text-align:left}
+th{background:#eef1f5;font-weight:600}
+td.n{text-align:right;font-family:ui-monospace,Consolas,monospace;font-variant-numeric:tabular-nums}
+tr.click{cursor:pointer}
+tr.click:hover{background:#f2f5f9}
+tr.on{background:#e8f0fb}
+.banner{padding:10px 14px;border-radius:5px;font-size:13px;margin:8px 0}
+.banner.pass{background:#e3f4e9;border:1px solid #b6e0c5}
+.banner.fail{background:#fdeaea;border:1px solid #f3c2c2}
+.banner ul{margin:4px 0 0 18px;padding:0}
+.card{background:var(--card);border:1px solid var(--line);border-radius:6px;padding:14px 16px}
+.row{display:flex;gap:10px;align-items:center;flex-wrap:wrap}
+select,button{font:inherit;padding:6px 10px;border:1px solid var(--line);border-radius:4px;background:#fff}
+button{background:var(--accent);color:#fff;border-color:var(--accent);cursor:pointer;font-weight:600}
+button:disabled{background:#9bb3d6;border-color:#9bb3d6;cursor:default}
+.hint{color:var(--sub);font-size:12px}
+.badge{display:inline-block;padding:1px 8px;border-radius:3px;font-size:12px;font-weight:600}
+.badge.p{background:#e3f4e9;color:var(--ok)}
+.badge.f{background:#fdeaea;color:var(--bad)}
+.badge.c{background:#fbe4e4;color:#8c1111}
+.step{padding:9px 0;border-bottom:1px dashed var(--line)}
+.step:last-child{border-bottom:none}
+.step .t{font-family:ui-monospace,Consolas,monospace;font-weight:600}
+.step .kv{color:var(--sub);font-size:12px;font-family:ui-monospace,Consolas,monospace;word-break:break-all}
+.step.bad{background:#fdf2f2;border-left:3px solid var(--bad);padding-left:10px;margin-left:-10px}
+.note{color:var(--bad);font-size:12px;font-weight:600}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:16px;align-items:start}
+@media(max-width:900px){.grid2{grid-template-columns:1fr}}
+</style>
+</head>
+<body><div class="wrap">
+<h1>LLM Agent 评测平台</h1>
+<div class="meta">实验列表来自 <span class="mono">results/*.json</span>；跑任务是现场调 <span class="mono">run_task</span> + <span class="mono">judge_task</span>，不复制任何判定逻辑。</div>
+
+<div class="grid2">
+  <div>
+    <h2>一、实验列表</h2>
+    <table id="runs"><thead><tr><th>实验</th><th>时间</th><th>门禁</th><th>矩阵</th></tr></thead>
+    <tbody><tr><td colspan="4" class="hint">加载中…</td></tr></tbody></table>
+  </div>
+  <div>
+    <h2>二、实验详情</h2>
+    <div id="detail" class="card hint">左边点一个实验看矩阵和门禁</div>
+  </div>
+</div>
+
+<h2>三、跑一条任务</h2>
+<div class="card">
+  <div class="row">
+    <label class="hint">任务</label>
+    <select id="taskSel" style="min-width:420px"></select>
+    <label class="hint">Agent</label>
+    <select id="agentSel"></select>
+    <button id="runBtn">运行</button>
+    <span id="runState" class="hint"></span>
+  </div>
+  <div class="hint" style="margin-top:8px">一条任务约 5–8 秒，同步返回，不轮询。</div>
+</div>
+
+<h2>四、轨迹</h2>
+<div id="trace" class="card hint">上面点「运行」看轨迹</div>
+</div>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const esc = (s) => String(s === null || s === undefined ? '' : s)
+  .replace(/[&<>]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const num = (v, d = 3) => (v === null || v === undefined || v === '') ? '—' : Number(v).toFixed(d);
+
+async function getJSON(url, options) {
+  const resp = await fetch(url, options);
+  if (!resp.ok) {
+    let detail = resp.status + '';
+    try { detail = (await resp.json()).detail || detail; } catch (e) {}
+    throw new Error(detail);
+  }
+  return resp.json();
+}
+
+// ---------- 一、实验列表 ----------
+async function loadRuns() {
+  const body = $('runs').querySelector('tbody');
+  try {
+    const { runs } = await getJSON('/api/runs');
+    if (!runs.length) { body.innerHTML = '<tr><td colspan="4" class="hint">results/ 下没有 json</td></tr>'; return; }
+    body.innerHTML = runs.map(r => `
+      <tr class="click" data-name="${esc(r.name)}">
+        <td class="mono">${esc(r.name)}</td>
+        <td class="hint">${esc(r.mtime)}</td>
+        <td>${r.gate_status ? `<span class="badge ${r.gate_status === 'PASS' ? 'p' : 'f'}">${esc(r.gate_status)}</span>` : '<span class="hint">—</span>'}</td>
+        <td class="hint">${r.has_matrix ? '有' : '—'}</td>
+      </tr>`).join('');
+    body.querySelectorAll('tr.click').forEach(tr => tr.onclick = () => openRun(tr.dataset.name, tr));
+  } catch (err) {
+    body.innerHTML = `<tr><td colspan="4" class="hint">加载失败：${esc(err.message)}</td></tr>`;
+  }
+}
+
+// ---------- 二、实验详情 ----------
+async function openRun(name, tr) {
+  document.querySelectorAll('#runs tr.on').forEach(x => x.classList.remove('on'));
+  if (tr) tr.classList.add('on');
+  const box = $('detail');
+  box.className = 'card';
+  box.innerHTML = '<span class="hint">加载中…</span>';
+  try {
+    const { data } = await getJSON('/api/runs/' + encodeURIComponent(name));
+    let html = '';
+    if (data.gate) {
+      const g = data.gate;
+      html += `<div class="banner ${g.status === 'PASS' ? 'pass' : 'fail'}">
+        <strong>门禁 ${esc(g.status)}</strong>
+        ${(g.failed || []).length ? '<ul>' + g.failed.map(f => `<li>${esc(f)} 未过门槛</li>`).join('') + '</ul>' : ''}
+        ${(g.warnings || []).map(w => `<div class="hint" style="color:var(--warn)">警告：${esc(w)}</div>`).join('')}
+      </div>`;
+      if ((g.checks || []).length) {
+        html += `<table style="margin-top:8px"><thead><tr><th>项</th><th>实际</th><th>门槛</th><th>结果</th></tr></thead><tbody>
+          ${g.checks.map(c => `<tr><td>${esc(c.name)}</td><td class="n">${num(c.value)}</td>
+            <td class="n">${num(c.threshold)}</td>
+            <td>${c.ok ? '通过' : '<span style="color:var(--bad);font-weight:600">未过</span>'}</td></tr>`).join('')}
+        </tbody></table>`;
+      }
+    }
+    if (Array.isArray(data.matrix) && data.matrix.length) {
+      html += `<table style="margin-top:12px"><thead><tr>
+        <th>集</th><th>组</th><th>strong</th><th>weak</th><th>gap</th><th>N</th><th>门槛</th><th>方向</th>
+        </tr></thead><tbody>
+        ${data.matrix.map(r => `<tr><td>${esc(r.set || r.name || '—')}</td><td>${esc(r.bucket || '—')}</td>
+          <td class="n">${num(r.strong)}</td><td class="n">${num(r.weak)}</td>
+          <td class="n">${r.gap === undefined ? '—' : (r.gap >= 0 ? '+' : '') + Number(r.gap).toFixed(3)}</td>
+          <td class="n">${r.n ?? r.runs ?? '—'}</td><td class="n">${num(r.threshold)}</td>
+          <td class="hint">${esc(r.direction || '—')}</td></tr>`).join('')}
+        </tbody></table>`;
+    }
+    if (!html) html = '<pre class="mono" style="max-height:420px;overflow:auto">' + esc(JSON.stringify(data, null, 2).slice(0, 4000)) + '</pre>';
+    box.innerHTML = html;
+  } catch (err) {
+    box.innerHTML = `<span class="hint">加载失败：${esc(err.message)}</span>`;
+  }
+}
+
+// ---------- 三、跑一条任务 ----------
+async function loadTasks() {
+  try {
+    const { tasks, agents } = await getJSON('/api/tasks');
+    $('taskSel').innerHTML = tasks.map(t =>
+      `<option value="${esc(t.id)}">${esc(t.id)} · ${esc(t.scenario || '—')} · ${esc(t.instruction).slice(0, 26)}</option>`).join('');
+    $('agentSel').innerHTML = agents.map(a =>
+      `<option value="${esc(a.name)}">${esc(a.name)}（${a.tools} 个工具）</option>`).join('');
+  } catch (err) {
+    $('runState').textContent = '任务列表加载失败：' + err.message;
+  }
+}
+
+async function runTask() {
+  const btn = $('runBtn');
+  btn.disabled = true;
+  $('runState').textContent = '跑着…（约 5–8 秒）';
+  $('trace').className = 'card';
+  $('trace').innerHTML = '<span class="hint">跑着…</span>';
+  try {
+    const out = await getJSON('/api/run', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ task_id: $('taskSel').value, agent: $('agentSel').value }),
+    });
+    renderTrace(out);
+    $('runState').textContent = `完成：${out.passed ? '通过' : '失败'} · ${out.steps.length} 步 · ${out.wall_ms} ms`;
+  } catch (err) {
+    $('trace').innerHTML = `<span class="hint">跑失败：${esc(err.message)}</span>`;
+    $('runState').textContent = '失败';
+  } finally {
+    btn.disabled = false;
+  }
+}
+
+// ---------- 四、轨迹 ----------
+function renderTrace(out) {
+  const cls = out.passed ? 'p' : (out.severity === 'critical' ? 'c' : 'f');
+  const label = out.passed ? '通过' : (out.severity === 'critical' ? '严重失败' : '失败');
+  let html = `<div class="row"><span class="badge ${cls}">${label}</span>
+    <span class="mono">${esc(out.task_id)}</span>
+    <span class="hint">${esc(out.agent)} · ${out.steps.length} 步 · ${out.wall_ms} ms ·
+    输入 ${out.prompt_tokens} / 输出 ${out.completion_tokens} token</span></div>
+    <div class="kv mono" style="margin:6px 0 12px">指令：${esc(out.instruction)}</div>`;
+  if (out.category) {
+    html += `<div class="note" style="margin-bottom:10px">${esc(out.category)}：${esc(out.detail)}</div>`;
+  }
+  if (!out.steps.length) {
+    html += '<div class="hint">这条没有工具调用（模型直接回答了）</div>';
+  }
+  out.steps.forEach(s => {
+    html += `<div class="step${s.forbidden ? ' bad' : ''}">
+      <div class="t">step ${s.step}　${esc(s.tool)}</div>
+      <div class="kv">参数　${esc(JSON.stringify(s.args))}</div>
+      <div class="kv">返回　${esc(JSON.stringify(s.result))}</div>
+      <div class="kv">耗时　${s.elapsed_ms} ms${s.error ? '　错误　' + esc(s.error) : ''}</div>
+      ${s.forbidden ? `<div class="note">← 这步不该发生：${esc(s.tool)} 在 forbid_tools 里</div>` : ''}
+    </div>`;
+  });
+  html += `<div class="kv mono" style="margin-top:12px">最终状态　${esc(JSON.stringify(out.final_state))}</div>`;
+  $('trace').innerHTML = html;
+}
+
+$('runBtn').onclick = runTask;
+loadRuns();
+loadTasks();
+</script>
+</body></html>

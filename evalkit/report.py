@@ -170,6 +170,25 @@ def build_html(data: dict[str, Any]) -> str:
                 r["status_429"])
             for r in perf["concurrency"]
         )
+        attrib = perf.get("attribution")
+        attrib_html = ""
+        if attrib:
+            attrib_html = """<div class="legend" style="margin-top:14px">TTFT 归因：同一个 prompt 去掉 6 个工具 schema 再测 10 次。</div>
+<table><thead><tr><th>场景</th><th>输入 token</th><th>TTFT P50（ms）</th><th>说明</th></tr></thead><tbody>
+<tr><td>带 6 个工具 schema</td><td class='n'>{wt}</td><td class='n'>{wttft}</td><td class="hint">评测时的真实输入</td></tr>
+<tr><td>不带 schema</td><td class='n'>{nt}</td><td class='n'>{nttft}</td><td class="hint">只剩 system prompt + 用户问题</td></tr>
+<tr><td><strong>差</strong></td><td class='n'>+{dt}</td><td class='n'>+{dttft}</td>
+<td class="hint">{msp} ms / 千 token</td></tr>
+</tbody></table>
+<div class="legend">拆开看：<strong>prefill 占 {ps:.0f}%</strong>（处理多出来的输入 token）、
+<strong>基线占 {bs:.0f}%</strong>（排队 / 连接，去掉 schema 也还在）。
+缩短输入有用，但省不到一半——真正的瓶颈是排队/连接。</div>""".format(
+                wt=attrib["with_tools_tokens"], wttft=_fmt(attrib["with_tools_ttft"], 1),
+                nt=attrib["without_tools_tokens"], nttft=_fmt(attrib["without_tools_ttft"], 1),
+                dt=attrib["delta_tokens"], dttft=_fmt(attrib["delta_ttft"], 1),
+                msp=_fmt(attrib["ms_per_1k"], 0),
+                ps=attrib["prefill_share"], bs=attrib["baseline_share"])
+
         perf_block = """<h2>八、推理性能</h2>
 <div class="legend">单请求 {samples} 次（串行，间隔 0.5s），同一个 prompt + 6 个工具 schema，和评测时一致。</div>
 <table><thead><tr><th>指标</th><th>P50</th><th>P95</th><th>min</th><th>max</th></tr></thead>
@@ -178,10 +197,11 @@ def build_html(data: dict[str, Any]) -> str:
 <div class="legend" style="margin-top:14px">并发扫描：每档 12 个请求，429 不重试（429 本身就是结论）。</div>
 <table><thead><tr><th>并发</th><th>吞吐（req/s）</th><th>P50（ms）</th><th>P95（ms）</th><th>429</th></tr></thead>
 <tbody>{conc_rows}</tbody></table>
+{attrib_html}
 <div class="conclusion" style="margin-top:14px">{conclusion}</div>
 <div class="legend">{perf_note}　实测时间 {measured}</div>""".format(
             samples=lat["ttft"]["n"], metric_rows=metric_rows, share=perf["share"],
-            rest=100 - perf["share"], conc_rows=conc_rows,
+            rest=100 - perf["share"], conc_rows=conc_rows, attrib_html=attrib_html,
             conclusion=perf["conclusion"], perf_note=perf["note"],
             measured=perf["measured_at"])
 
