@@ -460,27 +460,28 @@ def build_model_compare() -> dict[str, Any] | None:
         "need_n_pass": required_n(abs(pass_row["gap"]) or 0.01, a["pass_rate"], b["pass_rate"]),
         "need_n_red": required_n(abs(red_row["gap"]) or 0.01, a["red_rate"], b["red_rate"]),
         "note": (raw["note"] +
-                 "　<strong>这是修完 6 条坏题之后的数据（D24）</strong>；"
-                 "修前（D23）通过率 A 0.678 / B 0.742（gap −0.064，门槛 0.135，分不出），"
-                 "红线 A 0% / B 6.7%（gap 0.067，门槛 0.053，能区分）。"),
+                 "　<strong>这是修完全部 23 条坏题之后的数据（D26）</strong>："
+                 "D23 首次测（6 条坏题）→ D24 修完前 6 条 → D25 检查器又挖出 17 条 → D26 全部修完。<br>"
+                 "修前（D24）通过率 A 0.856 / B 0.705（gap +0.151，门槛 0.122，能区分）、"
+                 "红线 A 2.2% / B 6.8%（gap 0.046，门槛 0.062，分不出）。"),
         "conclusion": (
-            "<strong>修完坏题后，通过率能区分了</strong>：gap {0:+.3f}，门槛 {1:.3f}（N={2}/{3}）。"
-            "方向和修前<strong>相反</strong>——修前 B 高 6.4 pp，修后 A 高 15.1 pp。<br>"
-            "但<strong>红线违规率修后反而分不出</strong>（A {4:.1%} vs B {5:.1%}，"
-            "gap {6:.3f}，门槛 {7:.3f}）：因为 A 自己也有 {8} 次越权，把差距压到了门槛内。<br>"
-            "<strong>结论：修前的「B 通过率更高」是坏题奖励了不查 VIP 的模型；"
-            "修前「红线能区分」则是建立在 A 恰好 0 次越权的偶然上。</strong>"
-        ).format(pass_row["gap"], pass_row["threshold"], a["runs"], b["runs"],
-                 a["red_rate"], b["red_rate"], red_row["gap"], red_row["threshold"],
-                 a["red_runs"]),
+            "<strong>修完全部坏题后，两个指标都能区分了</strong>："
+            "通过率 gap {0:+.3f}（门槛 {1:.3f}）、红线违规率 gap {2:+.3f}（门槛 {3:.3f}）。<br>"
+            "<strong>A 的优势从 15.1 pp 扩大到 32.0 pp</strong>——修掉的那 16 条里，"
+            "有一批正是 B 靠「不查 VIP、直接按订单金额退全额」蒙对的。<br>"
+            "红线违规率也翻倍了（B {5:.1%} vs A {4:.1%}），但要注意："
+            "新增的 5 次越权里有 5 次落在 <code>gen-s1-009</code>/<code>016</code> 这两条"
+            "<strong>没改过的任务</strong>上，是模型随机波动，不能全记在「任务变难」头上。"
+        ).format(pass_row["gap"], pass_row["threshold"], red_row["gap"], red_row["threshold"],
+                 a["red_rate"], b["red_rate"]),
         "why": (
-            "修前 3 条任务（044/051/054）的期望写的是<strong>全额</strong>，而 B 从不调 "
-            "<code>get_user</code> 和 <code>calc_refund</code>，直接按订单金额退——"
-            "恰好和错误的期望对上，白拿了 3 条。修后期望改成非 VIP 的 90%，"
-            "B 的金额全错，这 3 条全丢。<br>"
-            "所以「B 更敢做」在错误的期望下是加分项，在正确的期望下是减分项。"
-            "<strong>指标没变、模型没变，只有任务定义变了，结论就反转——"
-            "这说明评测集本身决定了谁能赢。</strong>"
+            "累计修了 <strong>23 条坏题（22 个任务）</strong>：先人工查出 6 条，"
+            "补上三条自动检查后又挖出 17 条。<br>"
+            "坏题的共同点：<strong>它们都在奖励「不查 VIP、直接按订单金额退」的模型</strong>。"
+            "B 从不调 <code>get_user</code> 和 <code>calc_refund</code>，"
+            "在期望写错的那些任务上恰好对；期望改成非 VIP 的 90% 后，B 的金额全错。<br>"
+            "<strong>指标没变、模型没变，只有任务定义变对了，A 的优势就从 15 pp 变成 32 pp。</strong>"
+            "这说明之前那 15 pp 是被坏题压低的——不是 A 只比 B 强一点，是 A 强得多但被拖住了。"
         ),
     }
 

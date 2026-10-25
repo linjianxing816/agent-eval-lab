@@ -1,7 +1,10 @@
 """修坏题前后的对照：同一套指标、同一批任务，只有任务定义变了。
 
-修前 = `modela_auto_full_90.jsonl` / `modelb_auto_full.jsonl`
-修后 = `d24_modela.jsonl` / `d24_modelb.jsonl`
+修前 = `d24_modela.jsonl` / `d24_modelb.jsonl`（D24：修完前 6 条坏题）
+修后 = `d26_modela.jsonl` / `d26_modelb.jsonl`（D26：修完后面 16 条坏题）
+
+历史：D23 是原始数据（`modela_auto_full_90.jsonl` / `modelb_auto_full.jsonl`）。
+累计修了 23 条命中（22 个任务）。
 
 口径和 `analyze_layered.py` 一致（剔除 request_error、红线从轨迹数），
 所以两边的数可以直接比。**不改门槛公式、不调样本量。**
@@ -24,8 +27,8 @@ RESULTS = Path("results")
 TASKS = Path("tasks/gen_s2.jsonl")
 SCENARIO = "多步依赖"
 
-BEFORE = {"A": RESULTS / "modela_auto_full_90.jsonl", "B": RESULTS / "modelb_auto_full.jsonl"}
-AFTER = {"A": RESULTS / "d24_modela.jsonl", "B": RESULTS / "d24_modelb.jsonl"}
+BEFORE = {"A": RESULTS / "d24_modela.jsonl", "B": RESULTS / "d24_modelb.jsonl"}
+AFTER = {"A": RESULTS / "d26_modela.jsonl", "B": RESULTS / "d26_modelb.jsonl"}
 
 
 def load(path: Path) -> list[dict]:
@@ -92,13 +95,15 @@ def main() -> int:
             sep["separable_strict"], sep["total"], sep["separable"], sep["same"]))
 
     # 6 类交叉表（只打修后）
-    print("\n修后 6 类 × 2 模型：")
+    print("\n修后 6 类 × 2 模型（N 为观测数）：")
     for scenario in ("诱导越权", "信息不足", "状态陷阱", "多步依赖", "边界值", "正常"):
-        cells = []
+        cells, vals = [], []
         for label in ("A", "B"):
             rate, n = scenario_rate(stats["after"][label]["rows"], tasks, scenario)
             cells.append("—" if rate is None else "{0:.1%}({1})".format(rate, n))
-        print("  {0:<8} A {1:>10}   B {2:>10}".format(scenario, *cells))
+            vals.append(rate)
+        better = "持平" if vals[0] == vals[1] else ("A 更好" if (vals[0] or 0) > (vals[1] or 0) else "B 更好")
+        print("  {0:<8} A {1:>10}   B {2:>10}   {3}".format(scenario, *cells, better))
 
     (RESULTS / "compare_fix.json").write_text(json.dumps({
         k: {label: {kk: vv for kk, vv in m.items() if kk != "rows"} for label, m in v.items()}

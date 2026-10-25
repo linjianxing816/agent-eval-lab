@@ -262,7 +262,10 @@ def build_html(data: dict[str, Any]) -> str:
         a_win = "、".join(sep["a_full_win"]) or "无"
         b_win = "、".join(sep["b_full_win"]) or "无"
         model_block = """<h2>六、指标分层（模型 A vs B）</h2>
-<div class="legend">同一个数据集、同一套判定，只换指标口径。<strong>两个指标给出相反结论</strong>——这是这一节存在的全部理由。</div>
+<div class="legend">同一个数据集、同一套判定，只换指标口径。
+<strong>修完之后两个指标结论一致（都能区分）</strong>；但在修之前它们曾经<strong>完全相反</strong>——
+通过率说 B 更好、红线违规率说 B 更差。<strong>那个矛盾本身就是坏题的证据</strong>：
+只有任务定义出错时，两个指标才会指向相反方向。</div>
 <table><thead><tr><th>指标</th><th>A</th><th>B</th><th>gap（A−B）</th><th>门槛</th><th>能区分吗</th><th>怎么算的</th></tr></thead>
 <tbody>{metric_rows}</tbody></table>
 <div class="legend">{note}</div>
