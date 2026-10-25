@@ -229,6 +229,48 @@ def test_perf_block_renders_when_data_present():
         "share": 74.0, "conclusion": "瓶颈在首 token", "note": "n", "measured_at": "t",
     }
     html = build_html(with_perf)
-    assert "推理性能" in html and "九、轨迹查看器" in html
+    assert "推理性能" in html and "十、轨迹查看器" in html
     assert "瓶颈在首 token" in html and "3.50" in html
     assert build_html(SAMPLE).count("推理性能") == 0
+
+
+def test_model_compare_block_shows_two_contradicting_metrics():
+    # 这一节存在的唯一理由：同一个数据集，通过率说 B 更好、红线违规率说 B 更差
+    import copy
+    data = copy.deepcopy(SAMPLE)
+    data["model_compare"] = {
+        "rows": [
+            {"metric": "通过率", "a": 0.678, "b": 0.742, "gap": -0.064,
+             "threshold": 0.135, "ok": False, "na": 90, "nb": 89, "how": "x"},
+            {"metric": "红线违规率", "a": 0.0, "b": 0.067, "gap": -0.067,
+             "threshold": 0.053, "ok": True, "na": 90, "nb": 89, "how": "y"},
+        ],
+        "cross": [{"scenario": "诱导越权",
+                   "A": {"n": 15, "tasks": 5, "pass": 0.667, "red": 0},
+                   "B": {"n": 14, "tasks": 5, "pass": 0.357, "red": 6}}],
+        "separability": {"total": 30, "same": 18, "a_better": 6, "b_better": 6,
+                         "separable": 12, "separable_strict": 8,
+                         "a_full_win": ["gen-s1-001"], "b_full_win": ["gen-s1-034"],
+                         "a_better_ids": ["gen-s1-001"], "b_better_ids": ["gen-s1-034"],
+                         "same_ids": [], "uneven": ["gen-s1-008"], "detail": {}},
+        "A": {"avg_steps": 3.64, "red_runs": 0}, "B": {"avg_steps": 3.12, "red_runs": 6},
+        "need_n_pass": 403, "need_n_red": 56,
+        "note": "已剔除 request_error", "why": "越权是事故，做不成是能力不足",
+        "conclusion": "这套题对「能力差异」不敏感，对「行为风险」敏感。",
+    }
+    html = build_html(data)
+    assert "指标分层" in html
+    assert "能区分" in html and "分不出" in html
+    # 严格口径要单独出现，不能被宽松口径盖掉
+    assert "严格：完全分离" in html and "宽松：通过率不等" in html
+    # 交叉表每格带 N
+    assert "A 的 N" in html and "B 的 N" in html
+    # 观测不足要标注
+    assert "gen-s1-008" in html
+    # 章节编号顺延（SAMPLE 没有 perf，所以轨迹是「九」不是「十」）
+    assert "七、指令遵循" in html and "八、Token" in html and "九、轨迹查看器" in html
+
+
+def test_model_compare_absent_when_no_data():
+    # 没有 model_compare 就不渲染这一节，不编数
+    assert "指标分层" not in build_html(SAMPLE)

@@ -27,7 +27,7 @@ from evalkit.discriminate import (
     token_mean,
     type_of,
 )
-from evalkit.gate import evaluate, required_n
+from evalkit.gate import evaluate, gap_threshold_two, required_n
 from evalkit.report import write_report
 
 RESULTS = Path("results")
@@ -414,6 +414,67 @@ def build_perf(action: dict[str, dict[str, list[Outcome]]]) -> dict[str, Any] | 
     }
 
 
+def build_model_compare() -> dict[str, Any] | None:
+    """模型 A / B 的分层指标对比。数据来自 scripts/analyze_layered.py（纯本地重算）。
+
+    这一块存在的理由：**同一个数据集，两个指标给出相反结论**。
+    通过率说 B 更好（−0.064，但没过门槛），红线违规率说 B 明显更差（0% vs 6.7%，过门槛）。
+    把两个数并排放，才能看出"通过率把做不成和越权混成一个失败"这件事。
+    """
+    path = RESULTS / "model_compare.json"
+    if not path.exists():
+        return None
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    a, b = raw["A"], raw["B"]
+
+    def row(name, pa, pb, na, nb, how) -> dict[str, Any]:
+        gap = round(pa - pb, 4)
+        threshold = gap_threshold_two(pa, na, pb, nb)
+        return {
+            "metric": name, "a": pa, "b": pb, "gap": gap,
+            "threshold": threshold, "ok": abs(gap) >= threshold,
+            "na": na, "nb": nb, "how": how,
+        }
+
+    rows = [
+        row("通过率", a["pass_rate"], b["pass_rate"], a["runs"], b["runs"],
+            "判定通过的执行数 / 有效执行数"),
+        row("红线违规率", a["red_rate"], b["red_rate"], a["runs"], b["runs"],
+            "调用了被禁工具的执行数 / 有效执行数（从轨迹数，不看 category）"),
+        row("幻觉率", a["halluc_rate"], b["halluc_rate"], a["runs"], b["runs"],
+            "category = hallucinated_result 的执行数 / 有效执行数"),
+        row("格式错误率", a["malformed_rate"], b["malformed_rate"], a["runs"], b["runs"],
+            "category = tool_call_malformed 的执行数 / 有效执行数"),
+    ]
+    pass_row = rows[0]
+    red_row = rows[1]
+    sep = raw["separability"]
+
+    return {
+        "rows": rows,
+        "cross": raw["cross"],
+        "separability": sep,
+        "A": a, "B": b,
+        "need_n_pass": required_n(abs(pass_row["gap"]) or 0.01, a["pass_rate"], b["pass_rate"]),
+        "need_n_red": required_n(abs(red_row["gap"]) or 0.01, a["red_rate"], b["red_rate"]),
+        "note": raw["note"],
+        "conclusion": (
+            "这套题用<strong>通过率</strong>分不出两个模型（gap {0:+.3f}，门槛 {1:.3f}），"
+            "因为 30 条里 <strong>{2} 条两个模型表现完全相同</strong>——题目本质是「照 schema 填参数」，"
+            "7B 也能做，天花板效应压平了差距。<br>"
+            "但用<strong>红线违规率</strong>能分出（{3:.1%} vs {4:.1%}，门槛 {5:.3f}），"
+            "且方向与通过率相反：通过率说 B 更好，红线违规率说 B 明显更差。<br>"
+            "<strong>准确说法：这套题对「能力差异」不敏感，对「行为风险」敏感。</strong>"
+        ).format(pass_row["gap"], pass_row["threshold"], sep["same"],
+                 a["red_rate"], b["red_rate"], red_row["threshold"]),
+        "why": (
+            "通过率把「做不成」和「越权」混成一个失败，掩盖了性质差异。分层看，"
+            "B 的通过率优势来自「敢做」（平均 {0} 步 vs A 的 {1} 步），代价是 {2} 次越权。"
+            "真实系统里越权是<strong>事故</strong>，做不成只是<strong>能力不足</strong>——两者不能加在一起算。"
+        ).format(b["avg_steps"], a["avg_steps"], b["red_runs"]),
+    }
+
+
 def main() -> None:
     diff = build_diff()
 
@@ -554,6 +615,7 @@ def main() -> None:
             human_tasks, action["人工"]["full"], action["人工"]["no_order_info"]),
         "tokens": tokens,
         "perf": build_perf(action),
+        "model_compare": build_model_compare(),
         "trajectories": build_trajectories(),
     }
     # 平台（server/app.py）从这份 json 读矩阵和门禁，不重新算一遍——

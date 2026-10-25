@@ -141,7 +141,7 @@ def build_html(data: dict[str, Any]) -> str:
     )
     follow_block = ""
     if follow_rows:
-        follow_block = """<h2>六、指令遵循（027 / 028）</h2>
+        follow_block = """<h2>七、指令遵循（027 / 028）</h2>
 <table><thead><tr><th>任务</th><th>Agent</th><th>指令</th><th>期望金额</th><th>实际提交</th><th>结论</th></tr></thead>
 <tbody>{rows}</tbody></table>
 <div class="legend">{note}</div>""".format(rows=follow_rows, note=following["note"])
@@ -201,7 +201,7 @@ def build_html(data: dict[str, Any]) -> str:
                 ps=attrib["prefill_share"], bs=attrib["baseline_share"],
                 pairs=attrib.get("pairs", 10), reuse_html=reuse_html)
 
-        perf_block = """<h2>八、推理性能</h2>
+        perf_block = """<h2>九、推理性能</h2>
 <div class="legend">单请求 {samples} 次（串行，间隔 0.5s），同一个 prompt + 6 个工具 schema，和评测时一致。</div>
 <table><thead><tr><th>指标</th><th>P50</th><th>P95</th><th>min</th><th>max</th></tr></thead>
 <tbody>{metric_rows}</tbody></table>
@@ -233,6 +233,78 @@ def build_html(data: dict[str, Any]) -> str:
             r["label"], r["n"], r["gap"], r["se"], r["band"], r["verdict"])
         for r in strength["rows"]
     )
+
+    mc = data.get("model_compare")
+    model_block = ""
+    if mc:
+        metric_rows = "".join(
+            "<tr><td>{0}</td><td class='n'>{1}</td><td class='n'>{2}</td>"
+            "<td class='n'>{3:+.3f}</td><td class='n'>{4:.3f}</td>"
+            "<td>{5}</td><td class='hint'>{6}</td></tr>".format(
+                r["metric"], _fmt(r["a"], 3), _fmt(r["b"], 3), r["gap"], r["threshold"],
+                "<span style='color:#b3261e;font-weight:600'>能区分</span>" if r["ok"] else "分不出",
+                r["how"])
+            for r in mc["rows"]
+        )
+        cross_rows = "".join(
+            "<tr><td>{0}</td><td class='n'>{1}</td><td class='n'>{2}</td>"
+            "<td class='n'>{3}</td><td class='n'>{4}</td><td class='n'>{5}</td>"
+            "<td>{6}</td></tr>".format(
+                row["scenario"],
+                _fmt(row["A"]["pass"], 3), row["A"]["n"],
+                _fmt(row["B"]["pass"], 3), row["B"]["n"],
+                row["A"]["red"] + row["B"]["red"],
+                "A 更好" if (row["A"]["pass"] or 0) > (row["B"]["pass"] or 0)
+                else ("B 更好" if (row["A"]["pass"] or 0) < (row["B"]["pass"] or 0) else "持平"))
+            for row in mc["cross"]
+        )
+        sep = mc["separability"]
+        a_win = "、".join(sep["a_full_win"]) or "无"
+        b_win = "、".join(sep["b_full_win"]) or "无"
+        model_block = """<h2>六、指标分层（模型 A vs B）</h2>
+<div class="legend">同一个数据集、同一套判定，只换指标口径。<strong>两个指标给出相反结论</strong>——这是这一节存在的全部理由。</div>
+<table><thead><tr><th>指标</th><th>A</th><th>B</th><th>gap（A−B）</th><th>门槛</th><th>能区分吗</th><th>怎么算的</th></tr></thead>
+<tbody>{metric_rows}</tbody></table>
+<div class="legend">{note}</div>
+<div class="conclusion" style="margin-top:12px">{why}</div>
+
+<div class="legend" style="margin-top:16px">六类任务 × 两个模型。<strong>每格都带 N</strong>——30 条分 6 类，每类只有 4–8 条，比例很容易被一条带偏。</div>
+<table><thead><tr><th>类别</th><th>A 通过率</th><th>A 的 N</th><th>B 通过率</th><th>B 的 N</th>
+<th>越权次数（A+B）</th><th>谁更好</th></tr></thead>
+<tbody>{cross_rows}</tbody></table>
+
+<div class="legend" style="margin-top:16px"><strong>逐条任务比通过率</strong>（每条跑 3 次，所以有 3/3 vs 1/3 这种中间态）。
+两档口径都列，因为宽松那档会虚高：</div>
+<table><thead><tr><th>口径</th><th>任务数</th><th>占 30 条</th><th>判定规则</th></tr></thead><tbody>
+<tr><td><strong>严格：完全分离</strong></td><td class='n'><strong>{strict}</strong></td><td class='n'><strong>{strict_pct:.0%}</strong></td>
+<td class="hint">一边 3/3、另一边 0/3，没有歧义</td></tr>
+<tr><td>宽松：通过率不等</td><td class='n'>{sep}</td><td class='n'>{sep_pct:.0%}</td>
+<td class="hint">1/3 vs 0/2 也算——可两个数都表示「基本做不成」，差异没意义</td></tr>
+<tr><td>两个模型表现完全相同</td><td class='n'>{same}</td><td class='n'>{same_pct:.0%}</td>
+<td class="hint">都过 或 都不过，对区分没有贡献</td></tr>
+</tbody></table>
+<table style="margin-top:10px"><thead><tr><th>完全分离的任务</th><th>哪几条</th></tr></thead><tbody>
+<tr><td>A 赢（A 3/3、B 0/3）</td><td class="hint">{a_win}</td></tr>
+<tr><td>B 赢（B 3/3、A 0/3）</td><td class="hint">{b_win}</td></tr>
+</tbody></table>
+<div class="legend">「<strong>{strict}/{total}</strong>」这个数比 gap 直观：它回答<strong>这套题里有多少道题真的能分出好坏</strong>。
+30 条里 {same} 条两个模型都做对或都做错，对区分毫无贡献——这就是天花板效应的具体形状。
+<br>{uneven_note}</div>
+<div class="conclusion" style="margin-top:12px">{conclusion}</div>
+""".format(metric_rows=metric_rows, cross_rows=cross_rows, note=mc["note"],
+           why=mc["why"], same=sep["same"], same_pct=sep["same"] / sep["total"],
+           ab=sep["a_better"], ab_pct=sep["a_better"] / sep["total"],
+           bb=sep["b_better"], bb_pct=sep["b_better"] / sep["total"],
+           sep=sep["separable"], sep_pct=sep["separable"] / sep["total"],
+           strict=sep["separable_strict"], strict_pct=sep["separable_strict"] / sep["total"],
+           uneven_note=("注：{0} 这条任务 B 侧因剔除 request_error 只剩 2 次观测，"
+                        "它的通过率分母和别人不同，读的时候要打折扣。"
+                        ).format("、".join(sep.get("uneven") or []))
+                       if sep.get("uneven") else "",
+           a_ids="、".join(sep["a_better_ids"]) or "—",
+           b_ids="、".join(sep["b_better_ids"]) or "—",
+           a_win=a_win, b_win=b_win, total=sep["total"],
+           conclusion=mc["conclusion"])
 
     cards_html = "".join(
         '<div class="card"><div class="k">{0}</div><div class="v num">{1}</div>'
@@ -284,9 +356,11 @@ N=171 时旧门槛 0.0765、新门槛 0.1056，gap 0.0877 从「过」变成「�
 <div class="bars">{bars}</div>
 <div class="legend">{dist_note}</div>
 
+{model_block}
+
 {follow_block}
 
-<h2>七、Token 消耗（单任务平均）</h2>
+<h2>八、Token 消耗（单任务平均）</h2>
 <table><thead><tr><th>项</th><th>值</th><th>怎么算的</th></tr></thead>
 <tbody>{token_rows}</tbody></table>
 <div class="legend">{token_note}</div>
@@ -346,7 +420,7 @@ if (DATA.length) {{ document.querySelectorAll('.item')[0].click(); }}
                          token_note=tokens["note"], conclusion=data.get("conclusion", ""),
                          config_note=data.get("config_note", ""),
                          strength_rows=strength_rows, strength_note=strength["note"],
-                         perf_block=perf_block, traj_no="九" if perf else "八")
+                         perf_block=perf_block, model_block=model_block, traj_no="十" if perf else "九")
 
 
 def write_report(data: dict[str, Any], out_path: str | Path) -> Path:
