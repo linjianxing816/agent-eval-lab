@@ -108,7 +108,7 @@ def build_html(data: dict[str, Any]) -> str:
         "<tr><td>{0}</td><td>{1}</td><td class='n'>{2}</td><td class='n'>{3}</td>"
         "<td class='n'>{4}</td><td class='n'>{5}</td><td class='n'>{6}</td>"
         "<td>{7}</td><td>{8}</td></tr>".format(
-            row["set"], row["bucket"], _fmt(row["strong"]), _fmt(row["weak"]),
+            row["set"], row["bucket"], _fmt(row["full"]), _fmt(row["no_order_info"]),
             "{0:+.3f}".format(row["gap"]), row.get("n", ""), _fmt(row.get("threshold", 0.0)),
             row["direction"], row.get("source", ""))
         for row in matrix
@@ -170,24 +170,36 @@ def build_html(data: dict[str, Any]) -> str:
                 r["status_429"])
             for r in perf["concurrency"]
         )
+        reuse = perf.get("reuse")
+        reuse_html = ""
+        if reuse:
+            lows, highs = min(reuse["after_runs"]), max(reuse["after_runs"])
+            reuse_html = """<div class="legend" style="margin-top:10px">连接复用：
+每次新建 <code>httpx.Client</code> 时 <strong>{b:.0f} ms</strong> → 复用后 <strong>{lo:.0f}–{hi:.0f} ms</strong>
+（两次会话）。差值 23–81 ms，落在 TTFT 的会话波动里，<strong>不能说省了多少</strong>；
+能说的是<strong>握手不是主要成分</strong>——如果 TLS 握手占 200 ms 以上，复用后必然大幅下降，实际没有。</div>""".format(
+                b=reuse["before_p50"], lo=lows, hi=highs)
+
         attrib = perf.get("attribution")
         attrib_html = ""
         if attrib:
-            attrib_html = """<div class="legend" style="margin-top:14px">TTFT 归因：同一个 prompt 去掉 6 个工具 schema 再测 10 次。</div>
+            attrib_html = """<div class="legend" style="margin-top:14px">TTFT 归因：同一个 prompt 带 / 不带 6 个工具 schema，<strong>配对交替</strong>测 {pairs} 轮。</div>
 <table><thead><tr><th>场景</th><th>输入 token</th><th>TTFT P50（ms）</th><th>说明</th></tr></thead><tbody>
 <tr><td>带 6 个工具 schema</td><td class='n'>{wt}</td><td class='n'>{wttft}</td><td class="hint">评测时的真实输入</td></tr>
 <tr><td>不带 schema</td><td class='n'>{nt}</td><td class='n'>{nttft}</td><td class="hint">只剩 system prompt + 用户问题</td></tr>
-<tr><td><strong>差</strong></td><td class='n'>+{dt}</td><td class='n'>+{dttft}</td>
+<tr><td><strong>中位差（配对）</strong></td><td class='n'>+{dt}</td><td class='n'>+{dttft}</td>
 <td class="hint">{msp} ms / 千 token</td></tr>
 </tbody></table>
-<div class="legend">拆开看：<strong>prefill 占 {ps:.0f}%</strong>（处理多出来的输入 token）、
-<strong>基线占 {bs:.0f}%</strong>（排队 / 连接，去掉 schema 也还在）。
-缩短输入有用，但省不到一半——真正的瓶颈是排队/连接。</div>""".format(
+<div class="legend">拆开看：<strong>prefill 只占 {ps:.0f}%</strong>、基线占 {bs:.0f}%。
+配对是为了控住漂移：同一 prompt 的 TTFT 在不同时刻能差 1 秒以上，
+分批测出来的差（上一版算出 37%）其实是时段差异，不是输入长度的影响。</div>
+{reuse_html}""".format(
                 wt=attrib["with_tools_tokens"], wttft=_fmt(attrib["with_tools_ttft"], 1),
                 nt=attrib["without_tools_tokens"], nttft=_fmt(attrib["without_tools_ttft"], 1),
                 dt=attrib["delta_tokens"], dttft=_fmt(attrib["delta_ttft"], 1),
                 msp=_fmt(attrib["ms_per_1k"], 0),
-                ps=attrib["prefill_share"], bs=attrib["baseline_share"])
+                ps=attrib["prefill_share"], bs=attrib["baseline_share"],
+                pairs=attrib.get("pairs", 10), reuse_html=reuse_html)
 
         perf_block = """<h2>八、推理性能</h2>
 <div class="legend">单请求 {samples} 次（串行，间隔 0.5s），同一个 prompt + 6 个工具 schema，和评测时一致。</div>
@@ -227,6 +239,7 @@ def build_html(data: dict[str, Any]) -> str:
 <h1>LLM Agent 评测 · 报告</h1>
 <div class="meta">{meta}</div>
 <div class="conclusion">{conclusion}</div>
+<div class="legend" style="margin:0 0 12px;padding:10px 12px;background:#fff;border:1px solid #dfe3e8">{config_note}</div>
 {banner}
 
 <h2>一、四个数字</h2>
@@ -244,11 +257,11 @@ N=171 时旧门槛 0.0765、新门槛 0.1056，gap 0.0877 从「过」变成「�
 </div>
 
 <h2>三、矩阵</h2>
-<table><thead><tr><th>集</th><th>组</th><th>strong</th><th>weak</th><th>gap</th>
+<table><thead><tr><th>集</th><th>组</th><th>完整</th><th>缺订单信息</th><th>gap</th>
 <th>N（观测）</th><th>门槛</th><th>方向</th><th>数据源</th></tr></thead>
 <tbody>{matrix_rows}</tbody></table>
-<div class="legend">要做事组 gap = p_strong − p_weak（正数=弱 Agent 做不成事）；
-不该动组 gap = p_weak − p_strong（正数=弱 Agent 更保守）。两个数不合并。</div>
+<div class="legend">要做事组 gap = p_完整 − p_缺订单信息（正数=缺订单信息的 Agent 做不成事）；
+不该动组 gap = p_缺订单信息 − p_完整（正数=缺订单信息的 Agent 更保守）。两个数不合并。</div>
 <h2>四、样本量与结论强度</h2>
 <table><thead><tr><th>阶段</th><th>N（单 Agent 观测）</th><th>gap</th>
 <th>标准误 ±</th><th>误差带（2×se）</th><th>这个数能说明什么</th></tr></thead>
@@ -322,6 +335,7 @@ if (DATA.length) {{ document.querySelectorAll('.item')[0].click(); }}
                          dist_note=dist["note"], payload=payload,
                          follow_block=follow_block, token_rows=token_rows,
                          token_note=tokens["note"], conclusion=data.get("conclusion", ""),
+                         config_note=data.get("config_note", ""),
                          strength_rows=strength_rows, strength_note=strength["note"],
                          perf_block=perf_block, traj_no="九" if perf else "八")
 

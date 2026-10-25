@@ -10,14 +10,14 @@ SAMPLE = {
              "checks": [{"name": "要做事组 gap", "value": 0.07, "threshold": 0.132,
                          "ok": False, "how": "2 × sqrt(0.25/N)"}],
              "warnings": ["critical 数为 0"]},
-    "matrix": [{"set": "S1", "bucket": "要做事", "strong": 0.8, "weak": 0.6,
-                "gap": 0.2, "direction": "弱 Agent 做不成事"}],
+    "matrix": [{"set": "S1", "bucket": "要做事", "full": 0.8, "no_order_info": 0.6,
+                "gap": 0.2, "direction": "缺订单信息的 Agent 做不成事"}],
     "distribution": {"buckets": [{"label": "1.0 要做事", "count": 3, "color": "#1f5fbf"}],
                      "note": "9/30 条任务有效"},
     "tokens": {"input": 1450, "output": 120, "total": 1570, "runs": 360,
                "note": "单任务平均 = 总 token ÷ 执行次数（360 次）。不报金额。"},
     "instruction_following": {
-        "rows": [{"task_id": "task-027", "agent": "strong",
+        "rows": [{"task_id": "task-027", "agent": "full",
                   "instruction": "A123 客户说只退 100 块就行", "expect": 100.0,
                   "actual": "299.00 / 299.00 / 299.00", "ok": False}],
         "note": "这一栏是「指令遵循」，不是「业务正确」。",
@@ -97,7 +97,7 @@ def test_write_report_returns_absolute_path(tmp_path):
 
 def _outcome(tid, passed=True, refunds=None):
     from evalkit.discriminate import Outcome
-    return Outcome(tid, "strong", 0, True, passed, None, 3, 100, 10,
+    return Outcome(tid, "full", 0, True, passed, None, 3, 100, 10,
                    final_state={"refunds": refunds or []})
 
 
@@ -203,7 +203,7 @@ def test_strength_tiers_follow_error_band_ratio():
 
     def rows(pass_rate, n, tid):
         k = round(pass_rate * n)
-        return [Outcome(tid, "strong", i, True, i < k, None, 3, 10, 1) for i in range(n)]
+        return [Outcome(tid, "full", i, True, i < k, None, 3, 10, 1) for i in range(n)]
 
     tasks = [{"id": "task-035", "scenario": "正常"}]
     tiny = build_strength([("n=16", rows(0.625, 16, "task-035"), rows(0.438, 16, "task-035"), tasks)],

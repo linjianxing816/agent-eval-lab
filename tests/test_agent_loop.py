@@ -9,7 +9,7 @@ import json
 import pytest
 
 from evalkit.agent.loop import call_signature, run_task
-from evalkit.agent.strong import STRONG_AGENT
+from evalkit.agent.full import FULL_AGENT
 from evalkit.client import ChatError, FakeClient
 from evalkit.env.sandbox import Sandbox
 from evalkit.env.state import EnvState
@@ -31,8 +31,8 @@ def _run(client, max_steps=12):
     result = run_task(
         client, sandbox,
         instruction="帮我查订单 A123",
-        system_prompt=STRONG_AGENT["system_prompt"],
-        tools=STRONG_AGENT["tools"],
+        system_prompt=FULL_AGENT["system_prompt"],
+        tools=FULL_AGENT["tools"],
         max_steps=max_steps,
     )
     return result, sandbox

@@ -14,13 +14,13 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from evalkit.agent.strong import STRONG_AGENT
+from evalkit.agent.full import FULL_AGENT
 from evalkit.client import DeepSeekClient, load_settings
 from evalkit.perf import measure_latency
 
 RESULTS = Path("results")
 MESSAGES = [
-    {"role": "system", "content": STRONG_AGENT["system_prompt"]},
+    {"role": "system", "content": FULL_AGENT["system_prompt"]},
     {"role": "user", "content": "用户 U1001 要退订单 A123，按规则处理"},
 ]
 

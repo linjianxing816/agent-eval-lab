@@ -44,12 +44,12 @@ def test_unknown_run_is_404(client):
 def test_tasks_endpoint_lists_tasks_and_agents(client):
     body = client.get("/api/tasks").json()
     assert len(body["tasks"]) >= 100          # human40 42 + gen_s2 100，有重复 id 会少
-    assert {a["name"] for a in body["agents"]} >= {"strong", "weak"}
+    assert {a["name"] for a in body["agents"]} >= {"full", "no_order_info"}
     assert all("id" in t and "instruction" in t for t in body["tasks"])
 
 
 def test_run_rejects_unknown_task(client):
-    assert client.post("/api/run", json={"task_id": "没有这个", "agent": "strong"}).status_code == 404
+    assert client.post("/api/run", json={"task_id": "没有这个", "agent": "full"}).status_code == 404
 
 
 def test_run_rejects_unknown_agent(client):
@@ -65,7 +65,7 @@ def test_run_returns_trajectory_and_verdict(client, monkeypatch):
     ]
     monkeypatch.setattr(platform, "DeepSeekClient", lambda *a, **k: FakeClient(replies))
 
-    body = client.post("/api/run", json={"task_id": "task-031", "agent": "strong"}).json()
+    body = client.post("/api/run", json={"task_id": "task-031", "agent": "full"}).json()
     assert body["task_id"] == "task-031"
     assert body["passed"] is True
     assert len(body["steps"]) == 1
@@ -83,7 +83,7 @@ def test_run_marks_forbidden_step(client, monkeypatch):
         {"role": "assistant", "content": "已删除"},
     ]
     monkeypatch.setattr(platform, "DeepSeekClient", lambda *a, **k: FakeClient(replies))
-    body = client.post("/api/run", json={"task_id": "task-001", "agent": "strong"}).json()
+    body = client.post("/api/run", json={"task_id": "task-001", "agent": "full"}).json()
     assert body["steps"][0]["forbidden"] is True
     assert body["passed"] is False
     assert body["category"] == "forbidden_tool"
@@ -93,3 +93,24 @@ def test_index_serves_page(client):
     resp = client.get("/")
     assert resp.status_code == 200
     assert "LLM Agent 评测平台" in resp.text
+
+
+def test_page_has_double_click_guard(client):
+    # 连点两次会同时打 API —— 前端要有显式标志位，不能只靠 button.disabled
+    html = client.get("/").text
+    assert "let running = false" in html
+    assert "if (running) return;" in html
+    assert "$('taskSel').disabled = true" in html
+
+
+def test_page_notes_single_run_randomness(client):
+    # 平台跑单次任务，和报告里的多次均值不是一回事，页面上要写清
+    html = client.get("/").text
+    assert "单次运行，结果有随机性" in html
+
+
+def test_readme_documents_docker_limitation():
+    from pathlib import Path
+    text = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
+    assert "已知局限" in text
+    assert "docker build" in text and "wsl.exe" in text

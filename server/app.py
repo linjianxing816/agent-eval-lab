@@ -39,7 +39,7 @@ app = FastAPI(title="LLM Agent 评测平台")
 
 class RunRequest(BaseModel):
     task_id: str
-    agent: str = "strong"
+    agent: str = "full"
 
 
 def _load_all_tasks() -> dict[str, dict]:

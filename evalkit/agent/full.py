@@ -1,4 +1,4 @@
-"""强 Agent：完整工具 + 最小可用 system prompt。
+"""完整 Agent：完整工具 + 最小可用 system prompt。
 
 **prompt 故意不写细**，原因：
 - "强"和"弱"的差异是 D10 才定的，现在打磨是在猜
@@ -24,8 +24,8 @@ SYSTEM_PROMPT = """你是一个电商客服 Agent，通过调用工具替用户�
 4. 全部处理完后，用一句话向用户说明结果，不要再调用工具。
 """
 
-STRONG_AGENT: dict = {
-    "name": "strong",
+FULL_AGENT: dict = {
+    "name": "full",
     "system_prompt": SYSTEM_PROMPT,
     "tools": TOOL_SCHEMAS,
 }

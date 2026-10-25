@@ -127,6 +127,30 @@ class DeepSeekClient:
         self._transport = transport
         self._max_tokens = max_tokens
         self.last_elapsed_ms: float = 0.0
+        # 复用一个 httpx.Client：每次新建的话每次都要重新做 TCP + TLS 握手，
+        # 那部分时间会全部算进 TTFT。实测见 results/perf.json 的 before/after。
+        self._http: httpx.Client | None = None
+
+    def _client(self) -> httpx.Client:
+        """懒创建并复用。第一次调用才建，避免只构造不请求的场景白占连接。"""
+        if self._http is None:
+            kwargs: dict = {"timeout": httpx.Timeout(self._timeout, connect=CONNECT_TIMEOUT)}
+            if self._transport is not None:
+                kwargs["transport"] = self._transport
+            self._http = httpx.Client(**kwargs)
+        return self._http
+
+    def close(self) -> None:
+        """显式关掉连接池。不关会有 ResourceWarning，长跑脚本里也会攒 fd。"""
+        if self._http is not None:
+            self._http.close()
+            self._http = None
+
+    def __enter__(self) -> "DeepSeekClient":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
 
     def chat(self, messages: list[dict], tools: list[dict]) -> ChatReply:
         payload = {
@@ -140,13 +164,9 @@ class DeepSeekClient:
             "thinking": {"type": "enabled" if self._thinking else "disabled"},
         }
         headers = {"Authorization": "Bearer " + self._settings.api_key, "Content-Type": "application/json"}
-        kwargs: dict = {"timeout": httpx.Timeout(self._timeout, connect=CONNECT_TIMEOUT)}
-        if self._transport is not None:
-            kwargs["transport"] = self._transport
         started = time.perf_counter()
         try:
-            with httpx.Client(**kwargs) as client:
-                resp = client.post(chat_url(self._settings.base_url), json=payload, headers=headers)
+            resp = self._client().post(chat_url(self._settings.base_url), json=payload, headers=headers)
         except httpx.TimeoutException as exc:
             raise ChatError("请求超时（>{0:.0f}s），检查网络或代理".format(self._timeout)) from exc
         except httpx.HTTPError as exc:
@@ -187,9 +207,6 @@ class DeepSeekClient:
             "stream": True,
         }
         headers = {"Authorization": "Bearer " + self._settings.api_key, "Content-Type": "application/json"}
-        kwargs: dict = {"timeout": httpx.Timeout(self._timeout, connect=CONNECT_TIMEOUT)}
-        if self._transport is not None:
-            kwargs["transport"] = self._transport
 
         started = time.perf_counter()
         first_token_at: float | None = None
@@ -198,9 +215,8 @@ class DeepSeekClient:
         calls: dict[int, dict] = {}
         usage: dict = {}
         try:
-            with httpx.Client(**kwargs) as client:
-                with client.stream("POST", chat_url(self._settings.base_url),
-                                   json=payload, headers=headers) as resp:
+            with self._client().stream("POST", chat_url(self._settings.base_url),
+                                       json=payload, headers=headers) as resp:
                     if resp.status_code != 200:
                         resp.read()
                         hint = ("多半是 base_url 层级填错" if resp.status_code == 404

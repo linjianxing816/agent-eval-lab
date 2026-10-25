@@ -26,7 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from evalkit.agent.loop import run_task
-from evalkit.agent.strong import STRONG_AGENT
+from evalkit.agent.full import FULL_AGENT
 from evalkit.client import ChatError, ModelClient
 from evalkit.env.sandbox import Sandbox
 from evalkit.env.state import EnvState
@@ -87,8 +87,8 @@ def run_once(task: dict, client: ModelClient, max_steps: int | None = None) -> R
         result = run_task(
             client, sandbox,
             instruction=task["instruction"],
-            system_prompt=STRONG_AGENT["system_prompt"],
-            tools=STRONG_AGENT["tools"],
+            system_prompt=FULL_AGENT["system_prompt"],
+            tools=FULL_AGENT["tools"],
             max_steps=max_steps or steps,
         )
         verdict = judge_task(task, state.data, result, sandbox.trajectory())

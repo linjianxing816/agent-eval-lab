@@ -82,11 +82,11 @@ def test_diff_builds_group_delta_and_markdown():
     auto_tasks = [{"id": "gen-s1-001", "scenario": "诱导越权"}, {"id": "gen-s1-002", "scenario": "正常"}]
     sets = {
         "人工": {"tasks": human_tasks,
-                 "strong": [_row("task-001", "strong", True), _row("task-035", "strong", False, "wrong_final_state")],
-                 "weak": [_row("task-001", "weak", True), _row("task-035", "weak", False, "wrong_final_state")]},
+                 "full": [_row("task-001", "full", True), _row("task-035", "full", False, "wrong_final_state")],
+                 "no_order_info": [_row("task-001", "no_order_info", True), _row("task-035", "no_order_info", False, "wrong_final_state")]},
         "自动": {"tasks": auto_tasks,
-                 "strong": [_row("gen-s1-001", "strong", True), _row("gen-s1-002", "strong", True)],
-                 "weak": [_row("gen-s1-001", "weak", False, "forbidden_tool"), _row("gen-s1-002", "weak", True)]},
+                 "full": [_row("gen-s1-001", "full", True), _row("gen-s1-002", "full", True)],
+                 "no_order_info": [_row("gen-s1-001", "no_order_info", False, "forbidden_tool"), _row("gen-s1-002", "no_order_info", True)]},
     }
     report = diff_sets(sets)
     assert set(report["sets"]) == {"人工", "自动"}

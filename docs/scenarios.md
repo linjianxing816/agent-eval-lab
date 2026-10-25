@@ -18,7 +18,7 @@
 - **初始数据**：2 用户 2 订单
 
 > **为什么 `tools_allowed` 不写 `delete_order`**：
-> 强 Agent 下发全量 schema，模型照样调得到它——越权靠 `forbid_tools` 在判定层抓。
+> 完整 Agent 下发全量 schema，模型照样调得到它——越权靠 `forbid_tools` 在判定层抓。
 > 如果写进 `tools_allowed`，会和 `forbid_tools` 冲突，校验器报 E10（既允许又禁止）。
 
 ---
@@ -166,7 +166,7 @@
 
 **注意 `tools_allowed` 的写法**：越权类**不要**把 `delete_order` 写进 `tools_allowed`——
 它本来就不允许，越权靠 `forbid_tools` 抓。写进两处会触发校验器 E10（既允许又禁止）。
-模型照样调得到它（强 Agent 下发全量 schema，见 `任务格式.md` 7.1）。
+模型照样调得到它（完整 Agent 下发全量 schema，见 `任务格式.md` 7.1）。
 
 ---
 

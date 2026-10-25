@@ -40,14 +40,14 @@ def by_group(outcomes: list[Outcome], tasks: list[dict]) -> dict[str, dict[str, 
 
 
 def diff_sets(sets: dict[str, dict[str, Any]]) -> dict[str, Any]:
-    """sets: {集名: {"tasks": [...], "strong": [...], "weak": [...]}}"""
+    """sets: {集名: {"tasks": [...], "full": [...], "no_order_info": [...]}}"""
     report: dict[str, Any] = {"sets": {}, "by_group": {}, "group_delta": [], "note": ""}
     for name, payload in sets.items():
-        tasks, strong, weak = payload["tasks"], payload["strong"], payload["weak"]
+        tasks, strong, weak = payload["tasks"], payload["full"], payload["no_order_info"]
         report["sets"][name] = {
             "tasks": len(tasks),
-            "strong": summarize_agent(strong),
-            "weak": summarize_agent(weak),
+            "full": summarize_agent(strong),
+            "no_order_info": summarize_agent(weak),
             "by_type": compare_by_type(strong, weak, tasks),
         }
         report["by_group"][name] = by_group(strong, tasks)
@@ -85,8 +85,8 @@ def to_markdown(report: dict[str, Any]) -> str:
     lines += ["## 整集", "", "| 集 | 任务数 | strong 通过率 | weak 通过率 | 平均步数(strong) |", "|---|---|---|---|---|"]
     for name, info in report["sets"].items():
         lines.append("| {0} | {1} | {2:.3f} | {3:.3f} | {4} |".format(
-            name, info["tasks"], info["strong"]["pass_rate"],
-            info["weak"]["pass_rate"], info["strong"]["avg_steps"]))
+            name, info["tasks"], info["full"]["pass_rate"],
+            info["no_order_info"]["pass_rate"], info["full"]["avg_steps"]))
     lines.append("")
 
     lines += ["## 按任务类型（契约第七节口径）", "", "| 集 | 组 | strong | weak | gap | 方向 |", "|---|---|---|---|---|---|"]
@@ -94,7 +94,7 @@ def to_markdown(report: dict[str, Any]) -> str:
         for bucket in ("要做事", "不该动"):
             row = info["by_type"][bucket]
             lines.append("| {0} | {1} | {2:.3f} | {3:.3f} | {4:+.3f} | {5} |".format(
-                name, bucket, row["strong"], row["weak"], row["gap"], row["direction"]))
+                name, bucket, row["full"], row["no_order_info"], row["gap"], row["direction"]))
     lines.append("")
 
     if report["group_delta"]:
@@ -109,7 +109,7 @@ def to_markdown(report: dict[str, Any]) -> str:
 
     lines += ["## 失败原因分布", "", "| 集 | Agent | 分布 |", "|---|---|---|"]
     for name, info in report["sets"].items():
-        for agent in ("strong", "weak"):
+        for agent in ("full", "no_order_info"):
             lines.append("| {0} | {1} | {2} |".format(
                 name, agent, info[agent]["failure_distribution"]))
     lines.append("")

@@ -22,6 +22,7 @@ from evalkit.discriminate import (
     Outcome,
     compare_by_type,
     group_of,
+    normalize_agent,
     summarize_agent,
     token_mean,
     type_of,
@@ -55,7 +56,8 @@ def load_outcomes(path: Path) -> list[Outcome]:
             continue
         raw = json.loads(line)
         rows.append(Outcome(
-            task_id=raw["task_id"], agent=raw["agent"], run=raw["run"], ok=raw["ok"],
+            # 旧日志里写的是 strong / weak，统一映射成 full / no_order_info
+            task_id=raw["task_id"], agent=normalize_agent(raw["agent"]), run=raw["run"], ok=raw["ok"],
             passed=raw["passed"], category=raw["category"], steps=raw["steps"],
             prompt_tokens=raw["prompt_tokens"], completion_tokens=raw["completion_tokens"],
             trajectory=tuple(raw.get("trajectory") or ()),
@@ -69,11 +71,11 @@ def build_diff() -> dict[str, Any]:
     auto = sample_tasks(load_tasks("tasks/gen_s2.jsonl"), seed=2024)
     sets = {
         "人工集(42)": {"tasks": human,
-                       "strong": load_outcomes(RESULTS / "d13b_human_strong.jsonl"),
-                       "weak": load_outcomes(RESULTS / "d13b_human_weak.jsonl")},
+                       "full": load_outcomes(RESULTS / "d13b_human_strong.jsonl"),
+                       "no_order_info": load_outcomes(RESULTS / "d13b_human_weak.jsonl")},
         "自动集(30 抽样)": {"tasks": auto,
-                            "strong": load_outcomes(RESULTS / "d13_auto_strong.jsonl"),
-                            "weak": load_outcomes(RESULTS / "d13_auto_weak.jsonl")},
+                            "full": load_outcomes(RESULTS / "d13_auto_strong.jsonl"),
+                            "no_order_info": load_outcomes(RESULTS / "d13_auto_weak.jsonl")},
     }
     report = diff_sets(sets)
     (RESULTS / "diff.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -106,25 +108,25 @@ def build_trajectories() -> list[dict[str, Any]]:
         return [o for o in rows if group_of(tasks.get(o.task_id, {})) in groups]
 
     human = {
-        "strong": merge_override(pick_from(RESULTS / "d15_human_strong.jsonl", "要做事"),
+        "full": merge_override(pick_from(RESULTS / "d15_human_strong.jsonl", "要做事"),
                                  load_if_exists(RESULTS / "d16_human_strong.jsonl"))
                   + pick_from(RESULTS / "d13b_human_strong.jsonl", "不该动"),
-        "weak": merge_override(pick_from(RESULTS / "d15_human_weak.jsonl", "要做事"),
+        "no_order_info": merge_override(pick_from(RESULTS / "d15_human_weak.jsonl", "要做事"),
                                load_if_exists(RESULTS / "d16_human_weak.jsonl"))
                 + pick_from(RESULTS / "d13b_human_weak.jsonl", "不该动"),
     }
     auto = {
-        "strong": pick_from(RESULTS / "d15_auto_strong.jsonl", "要做事")
+        "full": pick_from(RESULTS / "d15_auto_strong.jsonl", "要做事")
                   + pick_from(RESULTS / "d16_auto_strong.jsonl", "要做事")
                   + pick_from(RESULTS / "d13_auto_strong.jsonl", "不该动"),
-        "weak": pick_from(RESULTS / "d15_auto_weak.jsonl", "要做事")
+        "no_order_info": pick_from(RESULTS / "d15_auto_weak.jsonl", "要做事")
                 + pick_from(RESULTS / "d16_auto_weak.jsonl", "要做事")
                 + pick_from(RESULTS / "d13_auto_weak.jsonl", "不该动"),
     }
 
     rows: list[dict[str, Any]] = []
     for label, outcomes_by_agent in (("人工集", human), ("自动集", auto)):
-        for agent in ("strong", "weak"):
+        for agent in ("full", "no_order_info"):
             counter: dict[str, int] = {}
             for outcome in outcomes_by_agent[agent]:
                 task = tasks.get(outcome.task_id, {})
@@ -162,17 +164,17 @@ def _task_rates(outcomes: list[Outcome]) -> dict[str, float]:
     return {tid: sum(v) / len(v) for tid, v in grouped.items()}
 
 
-def build_distribution(strong: list[Outcome], weak: list[Outcome],
+def build_distribution(full: list[Outcome], no_order_info: list[Outcome],
                        tasks: list[dict]) -> dict[str, Any]:
     kind = {t["id"]: type_of(t) for t in tasks}
-    s_map, w_map = _task_rates(strong), _task_rates(weak)
+    f_map, n_map = _task_rates(full), _task_rates(no_order_info)
     buckets = [("0.0", 0.0), ("0.25", 0.25), ("0.5", 0.5), ("0.75", 0.75), ("1.0", 1.0)]
     counts = {b: {"要做事": 0, "不该动": 0} for b, _ in buckets}
     effective = 0
-    for tid, rate in s_map.items():
-        if tid not in w_map:
+    for tid, rate in f_map.items():
+        if tid not in n_map:
             continue
-        diff = abs(rate - w_map[tid])
+        diff = abs(rate - n_map[tid])
         label = min(buckets, key=lambda b: abs(b[1] - diff))[0]
         counts[label][kind.get(tid, "要做事")] += 1
         if diff > 0:
@@ -185,8 +187,8 @@ def build_distribution(strong: list[Outcome], weak: list[Outcome],
     return {
         "buckets": rows,
         "note": "{0}/{1} 条任务有效（区分度 > 0）。同一任务多次跑取通过率均值，"
-                "再看 strong 与 weak 的差。只回答「多少条有效」，不用来看大小。".format(
-                    effective, len(s_map)),
+                "再看完整与缺订单信息的差。只回答「多少条有效」，不用来看大小。".format(
+                    effective, len(f_map)),
     }
 
 
@@ -198,8 +200,8 @@ def pick(outcomes: list[Outcome], tasks: list[dict], bucket: str) -> list[Outcom
     return [o for o in outcomes if o.task_id in ids]
 
 
-def build_instruction_following(tasks: list[dict], strong: list[Outcome],
-                                weak: list[Outcome]) -> dict[str, Any]:
+def build_instruction_following(tasks: list[dict], full_rows: list[Outcome],
+                                no_rows: list[Outcome]) -> dict[str, Any]:
     """027 / 028 单独统计「指令遵循」。
 
     这两条测的是"会不会按用户给的金额提交"，**不是业务正确**：
@@ -213,7 +215,7 @@ def build_instruction_following(tasks: list[dict], strong: list[Outcome],
         task = by_id[tid]
         expect = next((c["expect"] for c in task["success_criteria"]
                        if str(c["path"]).endswith(".amount")), None)
-        for label, outcomes in (("strong", strong), ("weak", weak)):
+        for label, outcomes in (("full", full_rows), ("no_order_info", no_rows)):
             mine = [o for o in outcomes if o.task_id == tid]
             if not mine:
                 continue
@@ -243,12 +245,12 @@ def build_strength(stages: list[tuple[str, list[Outcome], list[Outcome], list[di
     **误差带比 gap 还宽时，那个数没有意义**——不是效果小，是测不出来。
     """
     rows: list[dict[str, Any]] = []
-    for label, strong, weak, tasks in stages:
-        report = compare_by_type(strong, weak, tasks)["要做事"]
+    for label, full_rows, no_rows, tasks in stages:
+        report = compare_by_type(full_rows, no_rows, tasks)["要做事"]
         n = report["runs"]
         if n <= 0:
             continue
-        variance = report["strong"] * (1 - report["strong"]) + report["weak"] * (1 - report["weak"])
+        variance = report["full"] * (1 - report["full"]) + report["no_order_info"] * (1 - report["no_order_info"])
         se = (variance / n) ** 0.5
         band = 2 * se
         gap = report["gap"]
@@ -293,7 +295,7 @@ def build_perf(action: dict[str, dict[str, list[Outcome]]]) -> dict[str, Any] | 
     latency = raw["latency"]
 
     # 工具耗时：从已存轨迹里算（本地函数调用，应该是毫秒级）
-    runs = action["自动"]["strong"] + action["自动"]["weak"]
+    runs = action["自动"]["full"] + action["自动"]["no_order_info"]
     if not runs:
         return None
     tool_ms = sum(s["elapsed_ms"] for o in runs for s in o.trajectory) / len(runs)
@@ -309,11 +311,36 @@ def build_perf(action: dict[str, dict[str, list[Outcome]]]) -> dict[str, Any] | 
     llm_ms = steps * e2e
     ratio = llm_ms / tool_ms if tool_ms else 0.0
 
-    # TTFT 归因：同一个 prompt 去掉工具 schema 再测 10 次（scripts/ttft_attrib.py）
+    # TTFT 归因：优先用**配对测量**（scripts/ttft_pair.py）——
+    # 分批测的话两次之间网络会漂，漂移量比要测的效应还大（实测基线 503→750ms）。
     attrib = None
+    paired_path = RESULTS / "ttft_paired.json"
     attrib_path = RESULTS / "ttft_attrib.json"
     tokens_path = RESULTS / "ttft_tokens.json"
-    if attrib_path.exists() and tokens_path.exists():
+    if paired_path.exists() and tokens_path.exists():
+        paired = json.loads(paired_path.read_text(encoding="utf-8"))
+        counts = json.loads(tokens_path.read_text(encoding="utf-8"))
+        n_with = counts.get("with_tools_prompt_tokens") or 0
+        n_without = counts.get("without_tools_prompt_tokens") or 0
+        delta = paired["delta_p50"]
+        attrib = {
+            "paired": True,
+            "with_tools_ttft": paired["with_tools_p50"],
+            "with_tools_tokens": n_with,
+            "without_tools_ttft": paired["without_tools_p50"],
+            "without_tools_tokens": n_without,
+            "delta_ttft": delta, "delta_tokens": max(n_with - n_without, 1),
+            "ms_per_1k": round(delta / max(n_with - n_without, 1) * 1000, 1),
+            "baseline_share": round(paired["without_tools_p50"] / paired["with_tools_p50"] * 100, 1),
+            "prefill_share": round(delta / paired["with_tools_p50"] * 100, 1),
+            "pairs": paired["pairs"],
+            "positive_pairs": paired["delta_positive_pairs"],
+            "delta_min": paired["delta_min"], "delta_max": paired["delta_max"],
+            # 去掉最大离群点后的均值：一个 1059ms 的离群点能把均值从 2 拉到 108
+            "delta_mean_trimmed": round(
+                sum(sorted(r["delta"] for r in paired["rows"])[:-1]) / max(paired["pairs"] - 1, 1), 1),
+        }
+    elif attrib_path.exists() and tokens_path.exists():
         bare = json.loads(attrib_path.read_text(encoding="utf-8"))["without_tools"]
         counts = json.loads(tokens_path.read_text(encoding="utf-8"))
         bare_ttft = bare["ttft"]["p50"]
@@ -333,14 +360,19 @@ def build_perf(action: dict[str, dict[str, list[Outcome]]]) -> dict[str, Any] | 
     if share >= 50:
         if attrib:
             bottleneck = (
-                "首 token 慢（占端到端 {0:.0f}%），再拆一层：其中 <strong>{1:.0f} ms 是基线</strong>"
-                "（排队/连接，去掉工具 schema 也还在），<strong>{2:.0f} ms 是处理多出来的 {3} 个输入 token</strong>"
-                "（约 {4:.0f} ms / 千 token）。<br>"
-                "→ prefill 占 {5:.0f}%、基线占 {6:.0f}%。<strong>缩短输入有用，但省不到一半</strong>；"
-                "真正的瓶颈是排队/连接，优化方向是连接复用、错峰、换更近的接入点。"
-            ).format(share, attrib["without_tools_ttft"], attrib["delta_ttft"],
-                     attrib["delta_tokens"], attrib["ms_per_1k"],
-                     attrib["prefill_share"], attrib["baseline_share"])
+                "首 token 慢（占端到端 {0:.0f}%），再拆一层。<strong>配对测量</strong>（{1} 轮交替，同轮内一带一不带）："
+                "带 schema {2:.0f} ms、不带 {3:.0f} ms，中位差 <strong>{4:+.0f} ms</strong>；"
+                "但 {5}/{1} 轮为正、差值从 {6:+.0f} 到 {7:+.0f} ms 乱跳，"
+                "去掉一个离群点后均值只有 {8:+.0f} ms。<br>"
+                "→ <strong>prefill 的贡献测不出来</strong>（最多 ~{9:.0f}%，落在噪声里）。"
+                "TTFT 由服务端排队主导——同一个 prompt 的 TTFT 在 {10:.0f}–{11:.0f} ms 之间跳，"
+                "抖动比输入长度的影响大一个量级。<strong>缩短输入对首 token 没用。</strong>"
+            ).format(share, attrib["pairs"], attrib["with_tools_ttft"], attrib["without_tools_ttft"],
+                     attrib["delta_ttft"], attrib["positive_pairs"],
+                     attrib["delta_min"], attrib["delta_max"], attrib["delta_mean_trimmed"],
+                     attrib["prefill_share"],
+                     min(r["with_tools"] for r in json.loads(paired_path.read_text(encoding="utf-8"))["rows"]),
+                     max(r["with_tools"] for r in json.loads(paired_path.read_text(encoding="utf-8"))["rows"]))
         else:
             bottleneck = ("首 token 慢（占端到端 {0:.0f}%）：瓶颈在排队/网络，"
                           "不是模型解码。要提速得从连接复用、降低输入长度、错峰入手。".format(share))
@@ -357,9 +389,15 @@ def build_perf(action: dict[str, dict[str, list[Outcome]]]) -> dict[str, Any] | 
         "<br><strong>{7}</strong>"
     ).format(steps, tool_ms, e2e, ratio, ttft, tpot, tokens, bottleneck)
 
+    reuse = None
+    reuse_path = RESULTS / "reuse_compare.json"
+    if reuse_path.exists():
+        reuse = json.loads(reuse_path.read_text(encoding="utf-8"))
+
     return {
         "latency": latency,
         "attribution": attrib,
+        "reuse": reuse,
         "concurrency": raw.get("concurrency") or [],
         "steps": round(steps, 2),
         "tool_ms": round(tool_ms, 3),
@@ -384,29 +422,29 @@ def main() -> None:
 
     # D15 扩样本：只跑了要做事组（57 条 × 2 次 / 22 条 × 3 次）
     d15 = {
-        "人工": {"strong": load_if_exists(RESULTS / "d15_human_strong.jsonl"),
-                 "weak": load_if_exists(RESULTS / "d15_human_weak.jsonl")},
-        "自动": {"strong": load_if_exists(RESULTS / "d15_auto_strong.jsonl"),
-                 "weak": load_if_exists(RESULTS / "d15_auto_weak.jsonl")},
+        "人工": {"full": load_if_exists(RESULTS / "d15_human_strong.jsonl"),
+                 "no_order_info": load_if_exists(RESULTS / "d15_human_weak.jsonl")},
+        "自动": {"full": load_if_exists(RESULTS / "d15_auto_strong.jsonl"),
+                 "no_order_info": load_if_exists(RESULTS / "d15_auto_weak.jsonl")},
     }
     # D16：重跑 task-035（改了 instruction）+ 自动集最后一次加样本
     d16 = {
-        "人工": {"strong": load_if_exists(RESULTS / "d16_human_strong.jsonl"),
-                 "weak": load_if_exists(RESULTS / "d16_human_weak.jsonl")},
-        "自动": {"strong": load_if_exists(RESULTS / "d16_auto_strong.jsonl"),
-                 "weak": load_if_exists(RESULTS / "d16_auto_weak.jsonl")},
+        "人工": {"full": load_if_exists(RESULTS / "d16_human_strong.jsonl"),
+                 "no_order_info": load_if_exists(RESULTS / "d16_human_weak.jsonl")},
+        "自动": {"full": load_if_exists(RESULTS / "d16_auto_strong.jsonl"),
+                 "no_order_info": load_if_exists(RESULTS / "d16_auto_weak.jsonl")},
     }
     # 人工集：task-035 用新记录替换旧的；自动集：两批样本**相加**（不同 run，不重复）
     action = {
-        "人工": {k: merge_override(d15["人工"][k], d16["人工"][k]) for k in ("strong", "weak")},
-        "自动": {k: d15["自动"][k] + d16["自动"][k] for k in ("strong", "weak")},
+        "人工": {k: merge_override(d15["人工"][k], d16["人工"][k]) for k in ("full", "no_order_info")},
+        "自动": {k: d15["自动"][k] + d16["自动"][k] for k in ("full", "no_order_info")},
     }
     # 不该动组没重跑，从 D13 全量日志里挑
     old = {
-        "人工": {"strong": load_outcomes(RESULTS / "d13b_human_strong.jsonl"),
-                 "weak": load_outcomes(RESULTS / "d13b_human_weak.jsonl")},
-        "自动": {"strong": load_outcomes(RESULTS / "d13_auto_strong.jsonl"),
-                 "weak": load_outcomes(RESULTS / "d13_auto_weak.jsonl")},
+        "人工": {"full": load_outcomes(RESULTS / "d13b_human_strong.jsonl"),
+                 "no_order_info": load_outcomes(RESULTS / "d13b_human_weak.jsonl")},
+        "自动": {"full": load_outcomes(RESULTS / "d13_auto_strong.jsonl"),
+                 "no_order_info": load_outcomes(RESULTS / "d13_auto_weak.jsonl")},
     }
     tasks_of = {"人工": human_tasks, "自动": auto_tasks}
     sources = {
@@ -421,20 +459,20 @@ def main() -> None:
     for set_name in ("人工", "自动"):
         for bucket in ("要做事", "不该动"):
             pool = action[set_name] if bucket == "要做事" else old[set_name]
-            s_rows = pick(pool["strong"], tasks_of[set_name], bucket)
-            w_rows = pick(pool["weak"], tasks_of[set_name], bucket)
+            s_rows = pick(pool["full"], tasks_of[set_name], bucket)
+            w_rows = pick(pool["no_order_info"], tasks_of[set_name], bucket)
             report = compare_by_type(s_rows, w_rows, tasks_of[set_name])
             row = report[bucket]
             by_type[set_name + bucket] = row
             matrix.append({
-                "set": set_name, "bucket": bucket, "strong": row["strong"], "weak": row["weak"],
+                "set": set_name, "bucket": bucket, "full": row["full"], "no_order_info": row["no_order_info"],
                 "gap": row["gap"], "n": row["runs"], "threshold": row["threshold"],
                 "direction": row["direction"], "source": sources[(set_name, bucket)],
             })
 
     action_row = by_type["自动要做事"]
     audit = json.loads((RESULTS / "audit_s2.json").read_text(encoding="utf-8"))
-    critical = sum(1 for o in action["自动"]["strong"]
+    critical = sum(1 for o in action["自动"]["full"]
                    if o.category in ("forbidden_tool", "premature_finish",
                                      "hallucinated_result", "tool_call_malformed")
                    and not o.passed)
@@ -443,46 +481,52 @@ def main() -> None:
         "consistency_rate": audit["deterministic"]["consistency_rate"],
         "action_gap": action_row["gap"],
         "action_runs": action_row["runs"],
-        "action_strong": action_row["strong"],
-        "action_weak": action_row["weak"],
+        "action_strong": action_row["full"],
+        "action_weak": action_row["no_order_info"],
         "critical_count": critical,
     })
 
-    all_d15 = (action["人工"]["strong"] + action["人工"]["weak"]
-               + action["自动"]["strong"] + action["自动"]["weak"])
+    all_d15 = (action["人工"]["full"] + action["人工"]["no_order_info"]
+               + action["自动"]["full"] + action["自动"]["no_order_info"])
     tokens = token_mean(all_d15)
     tokens["note"] = ("单任务平均 = 总 token ÷ 执行次数（{0} 次，D15+D16 合计）。"
                       "**不报金额**：峰谷定价（工作日 9-12 / 14-18 双倍）和缓存命中率"
                       "（命中与未命中差 100 倍以上）都会让同一批实验算出不同数字，复现不出来。"
                       "token 是精确的。").format(tokens["runs"])
 
-    human_action = compare_by_type(pick(action["人工"]["strong"], human_tasks, "要做事"),
-                                   pick(action["人工"]["weak"], human_tasks, "要做事"),
+    human_action = compare_by_type(pick(action["人工"]["full"], human_tasks, "要做事"),
+                                   pick(action["人工"]["no_order_info"], human_tasks, "要做事"),
                                    human_tasks)["要做事"]
     strength = build_strength(
         [
             ("D13 抽样（30 条里的 16 条要做事）",
-             pick(old["自动"]["strong"], auto_tasks, "要做事"),
-             pick(old["自动"]["weak"], auto_tasks, "要做事"), auto_tasks),
+             pick(old["自动"]["full"], auto_tasks, "要做事"),
+             pick(old["自动"]["no_order_info"], auto_tasks, "要做事"), auto_tasks),
             ("D15 扩样本（57 条 × 2 次）",
-             pick(d15["自动"]["strong"], auto_tasks, "要做事"),
-             pick(d15["自动"]["weak"], auto_tasks, "要做事"), auto_tasks),
+             pick(d15["自动"]["full"], auto_tasks, "要做事"),
+             pick(d15["自动"]["no_order_info"], auto_tasks, "要做事"), auto_tasks),
             ("D15+D16（57 条 × 3 次）",
-             pick(action["自动"]["strong"], auto_tasks, "要做事"),
-             pick(action["自动"]["weak"], auto_tasks, "要做事"), auto_tasks),
+             pick(action["自动"]["full"], auto_tasks, "要做事"),
+             pick(action["自动"]["no_order_info"], auto_tasks, "要做事"), auto_tasks),
         ],
-        action_row["gap"], action_row["strong"], action_row["weak"])
+        action_row["gap"], action_row["full"], action_row["no_order_info"])
 
     data = {
         "conclusion": (
-            "两个任务集在「要做事」组都是 strong > weak 的方向（人工 {0:+.3f}、自动 {1:+.3f}），"
+            "两个任务集在「要做事」组都是「完整 > 缺订单信息」的方向（人工 {0:+.3f}、自动 {1:+.3f}），"
             "但幅度都在噪声内，未达显著。<br>"
             "<strong>结论：方向一致，幅度未达显著</strong>——按观测到的通过率，"
             "要判定这个幅度真实存在需要 N ≥ {2}（现在 N={3}）。"
             "<br>「方向一致」不依赖显著性：两个集的 gap 符号相同，这一点成立。"
         ).format(human_action["gap"], action_row["gap"], strength["need_n"], action_row["runs"]),
+        "config_note": (
+            "两种配置：<strong>完整</strong>（6 个工具全给）vs <strong>缺订单信息</strong>"
+            "（去掉 <code>get_order</code>）。循环和 system prompt 完全相同，<strong>只差 tools 里的一项</strong>——"
+            "只改一处才能把差异归因到「缺了订单信息」。"
+            "不叫 strong / weak：缺信息不是「弱」，它在「要做事」组更低、在「不该动」组反而更高。"
+        ),
         "strength": strength,
-        "meta": "数据源：D15 扩样本（自动集 57 条 × 2 次、人工集 22 条 × 3 次，strong / weak 各跑一遍）"
+        "meta": "数据源：D15 扩样本（自动集 57 条 × 2 次、人工集 22 条 × 3 次，完整 / 缺订单信息各跑一遍）"
                 "+ D13 全量（不该动组）。报告只报 token，不报金额。",
         "cards": [
             {"label": "可执行率", "value": "{0:.1%}".format(audit["executable"]["executable_rate"]),
@@ -500,12 +544,12 @@ def main() -> None:
         "matrix": matrix,
         # 分布要覆盖两组：要做事来自 D15，不该动来自 D13（不然"不该动"那排全是 0）
         "distribution": build_distribution(
-            pick(action["自动"]["strong"], auto_tasks, "要做事")
-            + pick(old["自动"]["strong"], auto_tasks, "不该动"),
-            pick(action["自动"]["weak"], auto_tasks, "要做事")
-            + pick(old["自动"]["weak"], auto_tasks, "不该动"), auto_tasks),
+            pick(action["自动"]["full"], auto_tasks, "要做事")
+            + pick(old["自动"]["full"], auto_tasks, "不该动"),
+            pick(action["自动"]["no_order_info"], auto_tasks, "要做事")
+            + pick(old["自动"]["no_order_info"], auto_tasks, "不该动"), auto_tasks),
         "instruction_following": build_instruction_following(
-            human_tasks, action["人工"]["strong"], action["人工"]["weak"]),
+            human_tasks, action["人工"]["full"], action["人工"]["no_order_info"]),
         "tokens": tokens,
         "perf": build_perf(action),
         "trajectories": build_trajectories(),
@@ -521,8 +565,8 @@ def main() -> None:
     path = write_report(data, RESULTS / "report.html")
     print("门禁:", gate["status"], "| 未过:", gate["failed"] or "无")
     for row in matrix:
-        print("  {0} {1}: strong {2:.3f} weak {3:.3f} gap {4:+.3f} n={5} 门槛 {6:.3f} | {7}".format(
-            row["set"], row["bucket"], row["strong"], row["weak"], row["gap"],
+        print("  {0} {1}: 完整 {2:.3f} 缺订单信息 {3:.3f} gap {4:+.3f} n={5} 门槛 {6:.3f} | {7}".format(
+            row["set"], row["bucket"], row["full"], row["no_order_info"], row["gap"],
             row["n"], row["threshold"], row["direction"]))
     print("  token 单任务平均: 输入 {0:,} / 输出 {1:,} / 合计 {2:,}".format(
         tokens["input"], tokens["output"], tokens["total"]))

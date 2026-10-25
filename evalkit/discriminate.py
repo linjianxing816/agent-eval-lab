@@ -1,6 +1,6 @@
-"""弱 Agent + 区分度测量（D10 / D11）。
+"""缺订单信息的 Agent + 区分度测量（D10 / D11）。
 
-【弱 Agent 怎么削弱：删掉 `get_order`】
+【缺订单信息的 Agent 怎么削弱：删掉 `get_order`】
 三条原则逐条对照：
 
 1. **绕不过去**：`get_order` 是拿到 `amount` 和 `status` 的唯一入口。
@@ -14,7 +14,7 @@
 
 3. **只改一处**：工具集少一个，system prompt 一个字没改。归因干净。
 
-**已知代价**（报告里要写）：有 40% 的任务断言是"状态没变"，弱 Agent 什么都不做也能过。
+**已知代价**（报告里要写）：有 40% 的任务断言是"状态没变"，缺订单信息的 Agent 什么都不做也能过。
 所以它的通过率会被这类任务抬高，区分度被低估——这是任务设计带来的，不是测量误差。
 """
 from __future__ import annotations
@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from evalkit.agent.loop import run_task
-from evalkit.agent.strong import STRONG_AGENT, SYSTEM_PROMPT
+from evalkit.agent.full import FULL_AGENT, SYSTEM_PROMPT
 from evalkit.client import ChatError, ModelClient
 from evalkit.env.sandbox import Sandbox
 from evalkit.env.state import EnvState
@@ -37,20 +37,20 @@ def _without(tool_name: str) -> list[dict]:
     return [t for t in TOOL_SCHEMAS if t["function"]["name"] != tool_name]
 
 
-WEAK_AGENT: dict[str, Any] = {          # 第 1/2 轮用的：删 get_order
-    "name": "weak_no_order",
+NO_ORDER_INFO_AGENT: dict[str, Any] = {          # 第 1/2 轮用的：删 get_order
+    "name": "no_order_info",
     "system_prompt": SYSTEM_PROMPT,
     "tools": _without("get_order"),
 }
 # 第 3 轮的两个候选。删 get_order 绕得过去，因为 calc_refund 是 oracle
 # （返回 refund_amount + basis），所以这轮直接打 oracle 和 VIP 信息来源。
-WEAK_NO_CALC: dict[str, Any] = {
-    "name": "weak_no_calc",
+NO_CALC_AGENT: dict[str, Any] = {
+    "name": "no_calc",
     "system_prompt": SYSTEM_PROMPT,
     "tools": _without("calc_refund"),
 }
-WEAK_NO_USER: dict[str, Any] = {
-    "name": "weak_no_user",
+NO_USER_AGENT: dict[str, Any] = {
+    "name": "no_user",
     "system_prompt": SYSTEM_PROMPT,
     "tools": _without("get_user"),
 }
@@ -89,11 +89,27 @@ def type_of(task: dict) -> str:
     return "要做事" if group_of(task) in ACTION_GROUPS else "不该动"
 
 
+# 旧日志里的名字 → 新名字。**读结果文件时必须过一遍**，否则同一份数据里
+# 一半叫 full、一半叫 full，分组统计会裂成两组。
+AGENT_ALIASES = {
+    "strong": "full",
+    "weak": "no_order_info",
+    "weak_no_order": "no_order_info",
+    "weak_no_calc": "no_calc",
+    "weak_no_user": "no_user",
+}
+
+
+def normalize_agent(name: str) -> str:
+    """把旧名字映射成新名字；已经是新名字或未知名字原样返回。"""
+    return AGENT_ALIASES.get(name, name)
+
+
 AGENTS = {
-    "strong": STRONG_AGENT,
-    "weak": WEAK_AGENT,
-    "weak_no_calc": WEAK_NO_CALC,
-    "weak_no_user": WEAK_NO_USER,
+    "full": FULL_AGENT,
+    "no_order_info": NO_ORDER_INFO_AGENT,
+    "no_calc": NO_CALC_AGENT,
+    "no_user": NO_USER_AGENT,
 }
 
 
@@ -228,7 +244,7 @@ def summarize_agent(outcomes: list[Outcome]) -> dict[str, Any]:
     }
 
 
-def per_task_diff(strong: list[Outcome], weak: list[Outcome]) -> list[dict]:
+def per_task_diff(full: list[Outcome], no_order_info: list[Outcome]) -> list[dict]:
     """单任务区分度。**只回答"多少条任务有效"，不设门槛**——
     repeat 小的时候单任务误差 ±0.38，比任何门槛都大，算出来是噪声。"""
     def by_task(outcomes: list[Outcome]) -> dict[str, float]:
@@ -237,22 +253,22 @@ def per_task_diff(strong: list[Outcome], weak: list[Outcome]) -> list[dict]:
             grouped.setdefault(o.task_id, []).append(o)
         return {tid: round(sum(1 for o in rs if o.passed) / len(rs), 4) for tid, rs in grouped.items()}
 
-    s_map, w_map = by_task(strong), by_task(weak)
+    f_map, n_map = by_task(full), by_task(no_order_info)
     rows = [
-        {"task_id": tid, "strong": s_map[tid], "weak": w_map[tid],
-         "diff": round(s_map[tid] - w_map[tid], 4)}
-        for tid in s_map if tid in w_map
+        {"task_id": tid, "full": f_map[tid], "no_order_info": n_map[tid],
+         "diff": round(f_map[tid] - n_map[tid], 4)}
+        for tid in f_map if tid in n_map
     ]
     rows.sort(key=lambda r: -r["diff"])
     return rows
 
 
-def compare_by_type(strong: list[Outcome], weak: list[Outcome],
+def compare_by_type(full: list[Outcome], no_order_info: list[Outcome],
                     tasks: list[dict]) -> dict[str, Any]:
     """按契约第七节分两组算区分度。
 
-    - 要做事：`p_strong - p_weak`，正数 = 弱 Agent 做不成事
-    - 不该动：`p_weak - p_strong`，正数 = 弱 Agent 因为不敢动而"通过"
+    - 要做事：`p_strong - p_weak`，正数 = 缺订单信息的 Agent 做不成事
+    - 不该动：`p_weak - p_strong`，正数 = 缺订单信息的 Agent 因为不敢动而"通过"
     """
     kind = {t["id"]: type_of(t) for t in tasks}
 
@@ -264,40 +280,40 @@ def compare_by_type(strong: list[Outcome], weak: list[Outcome],
 
     report: dict[str, Any] = {}
     for bucket in ("要做事", "不该动"):
-        s_rate, s_n = rate(strong, bucket)
-        w_rate, w_n = rate(weak, bucket)
-        gap = round(s_rate - w_rate, 4) if bucket == "要做事" else round(w_rate - s_rate, 4)
+        f_rate, f_n = rate(full, bucket)
+        n_rate, n_n = rate(no_order_info, bucket)
+        gap = round(f_rate - n_rate, 4) if bucket == "要做事" else round(n_rate - f_rate, 4)
         # 门槛按观测数算（2 倍标准误）。|gap| 落在门槛内就是噪声，不能说"方向反了"——
         # 实测人工集要做事组 22 个观测、误差 ±0.21，-0.045 完全在噪声里。
         # 两比例之差的标准误，不是单比例——见 gate.py 顶部说明
-        threshold = gap_threshold(s_rate, w_rate, s_n)
+        threshold = gap_threshold(f_rate, n_rate, f_n)
         if abs(gap) < threshold:
             if gap == 0:
                 direction = "无差异（门槛 {0:.3f}）".format(threshold)
             else:
                 direction = "方向一致但未达显著（差异在噪声内，门槛 {0:.3f}）".format(threshold)
         elif bucket == "要做事":
-            direction = "弱 Agent 做不成事"
+            direction = "缺订单信息的 Agent 做不成事"
         else:
-            direction = "弱 Agent 更保守（不该动却动得更少）"
+            direction = "缺订单信息的 Agent 更保守（不该动却动得更少）"
         report[bucket] = {
-            "strong": s_rate, "weak": w_rate, "gap": gap,
-            "runs": s_n, "tasks": len({r.task_id for r in strong if kind.get(r.task_id) == bucket}),
+            "full": f_rate, "no_order_info": n_rate, "gap": gap,
+            "runs": f_n, "tasks": len({r.task_id for r in full if kind.get(r.task_id) == bucket}),
             "threshold": threshold, "direction": direction,
         }
     return report
 
 
 def compare(sets: dict[str, dict[str, list[Outcome]]]) -> dict[str, Any]:
-    """sets: {任务集名: {"strong": [...], "weak": [...]}}"""
+    """sets: {任务集名: {"full": [...], "no_order_info": [...]}}"""
     report: dict[str, Any] = {}
     for name, pair in sets.items():
-        strong_sum = summarize_agent(pair["strong"])
-        weak_sum = summarize_agent(pair["weak"])
-        rows = per_task_diff(pair["strong"], pair["weak"])
+        strong_sum = summarize_agent(pair["full"])
+        weak_sum = summarize_agent(pair["no_order_info"])
+        rows = per_task_diff(pair["full"], pair["no_order_info"])
         report[name] = {
-            "strong": strong_sum,
-            "weak": weak_sum,
+            "full": strong_sum,
+            "no_order_info": weak_sum,
             "gap": round(strong_sum["pass_rate"] - weak_sum["pass_rate"], 4),
             "effective_tasks": sum(1 for r in rows if r["diff"] > 0),
             "task_count": len(rows),

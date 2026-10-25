@@ -71,7 +71,11 @@ button:disabled{background:#9bb3d6;border-color:#9bb3d6;cursor:default}
     <button id="runBtn">运行</button>
     <span id="runState" class="hint"></span>
   </div>
-  <div class="hint" style="margin-top:8px">一条任务约 5–8 秒，同步返回，不轮询。</div>
+  <div class="hint" style="margin-top:8px">
+    一条任务约 5–8 秒，同步返回，不轮询。
+    <strong>单次运行，结果有随机性</strong>——同一个任务连跑两次可能一次通过一次失败；
+    报告里的数字是多次跑的均值，不是这一条的结果。
+  </div>
 </div>
 
 <h2>四、轨迹</h2>
@@ -169,9 +173,17 @@ async function loadTasks() {
   }
 }
 
+// 连点保护：button.disabled 在同步阶段就置位，但下拉框和回车也能触发，
+// 所以再加一个显式标志，防止两次请求同时在飞
+let running = false;
+
 async function runTask() {
+  if (running) return;
+  running = true;
   const btn = $('runBtn');
   btn.disabled = true;
+  $('taskSel').disabled = true;
+  $('agentSel').disabled = true;
   $('runState').textContent = '跑着…（约 5–8 秒）';
   $('trace').className = 'card';
   $('trace').innerHTML = '<span class="hint">跑着…</span>';
@@ -186,7 +198,10 @@ async function runTask() {
     $('trace').innerHTML = `<span class="hint">跑失败：${esc(err.message)}</span>`;
     $('runState').textContent = '失败';
   } finally {
+    running = false;
     btn.disabled = false;
+    $('taskSel').disabled = false;
+    $('agentSel').disabled = false;
   }
 }
 
