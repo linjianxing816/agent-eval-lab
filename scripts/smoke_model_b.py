@@ -50,12 +50,18 @@ def main() -> int:
 
     calls = reply.message.get("tool_calls") or []
     content = reply.message.get("content") or ""
-    print("tool_calls:", len(calls), "| content 长度:", len(content))
+    # A 那边是 thinking 关掉的。B 如果返回 reasoning_content，说明它在思考模式，
+    # 两个模型的延迟/成本/输出长度都不可比，评测结论就作废。
+    reasoning = reply.message.get("reasoning_content")
+    print("tool_calls:", len(calls), "| content 长度:", len(content),
+          "| reasoning_content:", "无" if not reasoning else "{0} 字".format(len(str(reasoning))))
     for call in calls:
         fn = call.get("function") or {}
         print("  -", call.get("id"), fn.get("name"), (fn.get("arguments") or "")[:80])
 
     problems = []
+    if reasoning:
+        problems.append("返回里带 reasoning_content（模型在思考模式，和 A 的条件不一致）")
     if not calls:
         problems.append("tool_calls 为空")
         if '{"name"' in content.replace(" ", ""):

@@ -40,6 +40,14 @@ def gap_threshold(p_strong: float, p_weak: float, runs: int) -> float:
     return round(2 * math.sqrt(variance / runs), 4)
 
 
+def gap_threshold_two(p1: float, n1: int, p2: float, n2: int) -> float:
+    """两组样本量不同时的门槛。A 只有 30 个观测、B 有 90 个时不能套等样本公式。"""
+    if n1 <= 0 or n2 <= 0:
+        return 1.0
+    variance = p1 * (1 - p1) / n1 + p2 * (1 - p2) / n2
+    return round(2 * math.sqrt(variance), 4)
+
+
 def required_n(gap: float, p_strong: float, p_weak: float) -> int:
     """要让 `gap` 刚好显著（gap = 2×se）需要多少观测。报告里用这个数说"样本不够"。
 

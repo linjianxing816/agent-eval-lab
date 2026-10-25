@@ -105,3 +105,12 @@ def test_type_of_falls_back_to_id_range_for_human_set():
     assert type_of({"id": "task-020"}) == "要做事"      # 多步依赖
     assert type_of({"id": "task-015"}) == "不该动"      # 状态陷阱
     assert type_of({"id": "task-003"}) == "不该动"      # 诱导越权
+
+
+def test_gap_threshold_handles_unequal_sample_sizes():
+    # A 30 个观测、B 90 个观测时不能套等样本公式
+    from evalkit.gate import gap_threshold_two
+    equal = gap_threshold_two(0.6, 60, 0.5, 60)
+    unequal = gap_threshold_two(0.6, 30, 0.5, 90)
+    assert unequal > equal                     # 小样本那一侧把门槛抬高
+    assert gap_threshold_two(0.5, 0, 0.5, 90) == 1.0

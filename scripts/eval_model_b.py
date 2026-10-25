@@ -20,7 +20,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from evalkit.audit import load_tasks, sample_tasks
 from evalkit.client import DeepSeekClient, MissingConfigError, load_model_b_settings
 from evalkit.discriminate import AGENTS, run_batch, summarize_agent
-from evalkit.gate import gap_threshold, required_n
+from evalkit.gate import gap_threshold, gap_threshold_two, required_n
 
 REPEATS = 3
 
@@ -55,8 +55,15 @@ def main() -> int:
         base_steps = sum(r["steps"] for r in rows) / len(rows)
         print("A (deepseek-flash): 通过率 {0:.3f} | 平均步数 {1:.1f}".format(base_pass, base_steps))
         diff = mine["pass_rate"] - base_pass
-        threshold = gap_threshold(base_pass, mine["pass_rate"], runs)
-        print("\n差: 通过率 {0:+.3f}（B − A）| 门槛 {1:.3f}（N={2}）".format(diff, threshold, runs))
+        # A 只有 30 个观测（d13 每条跑 1 次），B 有 90 个——两组样本量不同，
+        # 不能套等样本公式，否则门槛会算错。
+        n_a, n_b = len(rows), runs
+        threshold = gap_threshold_two(base_pass, n_a, mine["pass_rate"], n_b)
+        print("\nA 通过率 {0:.3f}（N={1}） vs B 通过率 {2:.3f}（N={3}）".format(
+            base_pass, n_a, mine["pass_rate"], n_b))
+        print("差: {0:+.3f}（B − A）| 门槛 {1:.3f}（不等样本公式）".format(diff, threshold))
+        print("（等样本近似门槛 {0:.3f}，仅供参考）".format(
+            gap_threshold(base_pass, mine["pass_rate"], min(n_a, n_b))))
         if abs(diff) >= threshold:
             print("结论：差 {0:.3f} 超过门槛 {1:.3f} → 这套题**能**分出这两个模型".format(abs(diff), threshold))
         else:
