@@ -215,3 +215,20 @@ def test_strength_tiers_follow_error_band_ratio():
                          0.12, 0.62, 0.50)
     assert "可以判定" in big["rows"][0]["verdict"]
     assert big["rows"][0]["band"] < big["rows"][0]["gap"]
+
+
+def test_perf_block_renders_when_data_present():
+    # 有 perf 数据才渲染「推理性能」，没有就不出现（不编数）
+    import copy
+    with_perf = copy.deepcopy(SAMPLE)
+    with_perf["perf"] = {
+        "latency": {k: {"p50": 800, "p95": 1100, "min": 450, "max": 1230, "n": 20}
+                    for k in ("ttft", "tpot", "e2e", "output_tokens")},
+        "concurrency": [{"concurrency": 1, "throughput": 1.02, "p50": 1057, "p95": 1123, "status_429": 0},
+                        {"concurrency": 4, "throughput": 3.5, "p50": 1065, "p95": 1370, "status_429": 2}],
+        "share": 74.0, "conclusion": "瓶颈在首 token", "note": "n", "measured_at": "t",
+    }
+    html = build_html(with_perf)
+    assert "推理性能" in html and "九、轨迹查看器" in html
+    assert "瓶颈在首 token" in html and "3.50" in html
+    assert build_html(SAMPLE).count("推理性能") == 0

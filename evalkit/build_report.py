@@ -281,6 +281,66 @@ def build_strength(stages: list[tuple[str, list[Outcome], list[Outcome], list[di
     }
 
 
+def build_perf(action: dict[str, dict[str, list[Outcome]]]) -> dict[str, Any] | None:
+    """推理性能：读 results/perf.json（D15/D16 跑出来的），加上工具耗时推算比例。
+
+    没有 perf.json 就返回 None，报告里那一节不渲染——**不编数**。
+    """
+    path = RESULTS / "perf.json"
+    if not path.exists():
+        return None
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    latency = raw["latency"]
+
+    # 工具耗时：从已存轨迹里算（本地函数调用，应该是毫秒级）
+    runs = action["自动"]["strong"] + action["自动"]["weak"]
+    if not runs:
+        return None
+    tool_ms = sum(s["elapsed_ms"] for o in runs for s in o.trajectory) / len(runs)
+    steps = sum(len(o.trajectory) for o in runs) / len(runs)
+
+    ttft = latency["ttft"]["p50"]
+    tpot = latency["tpot"]["p50"]
+    e2e = latency["e2e"]["p50"]
+    tokens = latency["output_tokens"]["p50"]
+    share = latency["ttft_share_pct"]["p50"]
+
+    # 一次任务 = 每步一次 LLM 往返；LLM 时间按实测单次往返推算
+    llm_ms = steps * e2e
+    ratio = llm_ms / tool_ms if tool_ms else 0.0
+
+    if share >= 50:
+        bottleneck = ("首 token 慢（占端到端 {0:.0f}%）：瓶颈在排队/网络，"
+                      "不是模型解码。要提速得从连接复用、降低输入长度、错峰入手。".format(share))
+    else:
+        bottleneck = ("每 token 慢（首 token 只占 {0:.0f}%，其余 {1:.0f}% 是逐 token 生成）："
+                      "瓶颈在解码速度。输出越长越慢，所以要提速得压输出长度"
+                      "（少让它写解释、工具返回别太长）。".format(share, 100 - share))
+
+    conclusion = (
+        "一次 Agent 任务平均 {0:.1f} 步，每步一次 LLM 往返。工具是本地函数调用，"
+        "单次平均 {1:.2f} ms；按实测单次往返 {2:.0f} ms 推算，"
+        "LLM 时间 : 工具时间 ≈ <strong>{3:,.0f} : 1</strong>。<br>"
+        "拆开看：首 token {4:.0f} ms，之后每个 token {5:.1f} ms × 约 {6:.0f} 个输出 token。"
+        "<br><strong>{7}</strong>"
+    ).format(steps, tool_ms, e2e, ratio, ttft, tpot, tokens, bottleneck)
+
+    return {
+        "latency": latency,
+        "concurrency": raw.get("concurrency") or [],
+        "steps": round(steps, 2),
+        "tool_ms": round(tool_ms, 3),
+        "llm_ms": round(llm_ms, 1),
+        "ratio": round(ratio, 1),
+        "share": round(share, 1),
+        "conclusion": conclusion,
+        "measured_at": raw.get("measured_at", ""),
+        "note": "TTFT = 首个 content/tool_call delta 的时间（role 那种元数据 delta 不算）；"
+                "TPOT = (收完 − 首 token) / (输出 token 数 − 1)；端到端 = 发请求到 [DONE]。"
+                "串行 20 次、间隔 0.5s；并发扫描每档 12 个请求，429 不重试。",
+    }
+
+
 def main() -> None:
     diff = build_diff()
 
@@ -414,6 +474,7 @@ def main() -> None:
         "instruction_following": build_instruction_following(
             human_tasks, action["人工"]["strong"], action["人工"]["weak"]),
         "tokens": tokens,
+        "perf": build_perf(action),
         "trajectories": build_trajectories(),
     }
     path = write_report(data, RESULTS / "report.html")

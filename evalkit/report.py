@@ -146,6 +146,45 @@ def build_html(data: dict[str, Any]) -> str:
 <tbody>{rows}</tbody></table>
 <div class="legend">{note}</div>""".format(rows=follow_rows, note=following["note"])
 
+    perf = data.get("perf")
+    perf_block = ""
+    if perf:
+        lat = perf["latency"]
+        metric_rows = "".join(
+            "<tr><td>{0}</td><td class='n'>{1}</td><td class='n'>{2}</td>"
+            "<td class='n'>{3}</td><td class='n'>{4}</td></tr>".format(
+                name, _fmt(row["p50"], digits), _fmt(row["p95"], digits),
+                _fmt(row["min"], digits), _fmt(row["max"], digits))
+            for name, row, digits in (
+                ("首 token TTFT（ms）", lat["ttft"], 1),
+                ("每 token TPOT（ms）", lat["tpot"], 1),
+                ("端到端（ms）", lat["e2e"], 1),
+                ("输出 token（个）", lat["output_tokens"], 0),
+            )
+        )
+        conc_rows = "".join(
+            "<tr><td class='n'>{0}</td><td class='n'>{1:.2f}</td><td class='n'>{2:.0f}</td>"
+            "<td class='n'>{3:.0f}</td><td class='n'{4}>{5}</td></tr>".format(
+                r["concurrency"], r["throughput"], r["p50"], r["p95"],
+                " style='color:#b3261e;font-weight:600'" if r["status_429"] else "",
+                r["status_429"])
+            for r in perf["concurrency"]
+        )
+        perf_block = """<h2>八、推理性能</h2>
+<div class="legend">单请求 {samples} 次（串行，间隔 0.5s），同一个 prompt + 6 个工具 schema，和评测时一致。</div>
+<table><thead><tr><th>指标</th><th>P50</th><th>P95</th><th>min</th><th>max</th></tr></thead>
+<tbody>{metric_rows}</tbody></table>
+<div class="legend">首 token 占端到端 <strong>{share:.0f}%</strong>（P50）——剩下 {rest:.0f}% 是逐 token 生成。</div>
+<div class="legend" style="margin-top:14px">并发扫描：每档 12 个请求，429 不重试（429 本身就是结论）。</div>
+<table><thead><tr><th>并发</th><th>吞吐（req/s）</th><th>P50（ms）</th><th>P95（ms）</th><th>429</th></tr></thead>
+<tbody>{conc_rows}</tbody></table>
+<div class="conclusion" style="margin-top:14px">{conclusion}</div>
+<div class="legend">{perf_note}　实测时间 {measured}</div>""".format(
+            samples=lat["ttft"]["n"], metric_rows=metric_rows, share=perf["share"],
+            rest=100 - perf["share"], conc_rows=conc_rows,
+            conclusion=perf["conclusion"], perf_note=perf["note"],
+            measured=perf["measured_at"])
+
     strength = data.get("strength") or {"rows": [], "note": "", "need_n": 0}
     strength_rows = "".join(
         "<tr><td>{0}</td><td class='n'>{1}</td><td class='n'>{2:+.4f}</td>"
@@ -210,7 +249,9 @@ N=171 时旧门槛 0.0765、新门槛 0.1056，gap 0.0877 从「过」变成「�
 <tbody>{token_rows}</tbody></table>
 <div class="legend">{token_note}</div>
 
-<h2>八、轨迹查看器</h2>
+{perf_block}
+
+<h2>{traj_no}、轨迹查看器</h2>
 <div class="viewer">
   <div class="list" id="list"></div>
   <div class="detail" id="detail"><div class="empty">左边点一条任务看轨迹</div></div>
@@ -261,7 +302,8 @@ if (DATA.length) {{ document.querySelectorAll('.item')[0].click(); }}
                          dist_note=dist["note"], payload=payload,
                          follow_block=follow_block, token_rows=token_rows,
                          token_note=tokens["note"], conclusion=data.get("conclusion", ""),
-                         strength_rows=strength_rows, strength_note=strength["note"])
+                         strength_rows=strength_rows, strength_note=strength["note"],
+                         perf_block=perf_block, traj_no="九" if perf else "八")
 
 
 def write_report(data: dict[str, Any], out_path: str | Path) -> Path:
