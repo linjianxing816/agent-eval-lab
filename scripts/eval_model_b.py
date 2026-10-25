@@ -4,7 +4,10 @@
 否则"B 比 A 差"可能只是"这 30 条比那 57 条难"。所以这里直接复用 D13 的抽样函数。
 
 用法：
-    python scripts/eval_model_b.py          # 30 条 × 1 次 ≈ 5 分钟
+    python scripts/eval_model_b.py          # 30 条 × 3 次 = 90 次执行 ≈ 15 分钟
+
+**为什么是 3 次不是 1 次**：30 条 × 1 次只有 30 个观测，门槛 2×sqrt(0.5/30)=0.26——
+B 比 A 差 0.24 都测不出来。3 次 = 90 个观测，门槛降到约 0.15。
 """
 from __future__ import annotations
 
@@ -17,6 +20,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from evalkit.audit import load_tasks, sample_tasks
 from evalkit.client import DeepSeekClient, MissingConfigError, load_model_b_settings
 from evalkit.discriminate import AGENTS, run_batch, summarize_agent
+from evalkit.gate import gap_threshold, required_n
+
+REPEATS = 3
 
 RESULTS = Path("results")
 LOG = RESULTS / "modelb_auto_full.jsonl"
@@ -31,9 +37,11 @@ def main() -> int:
         return 2
 
     tasks = sample_tasks(load_tasks("tasks/gen_s2.jsonl"), seed=2024)
-    print("模型:", settings.model, "| 任务:", len(tasks), "条 × 1 次", flush=True)
+    runs = len(tasks) * REPEATS
+    print("模型:", settings.model, "| 任务:", len(tasks), "条 ×", REPEATS, "次 =", runs, "次执行", flush=True)
+    print("门槛（p=0.5 最保守）:", round(gap_threshold(0.5, 0.5, runs), 3), flush=True)
     client = DeepSeekClient(settings, thinking=False, max_tokens=1024, timeout=90.0)
-    outcomes = run_batch(tasks, AGENTS["full"], client, repeats=1, log=LOG)
+    outcomes = run_batch(tasks, AGENTS["full"], client, repeats=REPEATS, log=LOG)
     client.close()
 
     mine = summarize_agent(outcomes)
@@ -46,8 +54,15 @@ def main() -> int:
         base_pass = sum(1 for r in rows if r["passed"]) / len(rows)
         base_steps = sum(r["steps"] for r in rows) / len(rows)
         print("A (deepseek-flash): 通过率 {0:.3f} | 平均步数 {1:.1f}".format(base_pass, base_steps))
-        print("\n差: 通过率 {0:+.3f}（B − A）".format(mine["pass_rate"] - base_pass))
-        print("结论口径：差 > 0.10 说明这套题能分出这两个模型；差 < 0.05 说明分不出（或两个模型确实接近）。")
+        diff = mine["pass_rate"] - base_pass
+        threshold = gap_threshold(base_pass, mine["pass_rate"], runs)
+        print("\n差: 通过率 {0:+.3f}（B − A）| 门槛 {1:.3f}（N={2}）".format(diff, threshold, runs))
+        if abs(diff) >= threshold:
+            print("结论：差 {0:.3f} 超过门槛 {1:.3f} → 这套题**能**分出这两个模型".format(abs(diff), threshold))
+        else:
+            need = required_n(abs(diff) or 0.01, base_pass, mine["pass_rate"])
+            print("结论：差 {0:.3f} 未过门槛 {1:.3f} → 分不出（要判定需要 N≈{2}）".format(
+                abs(diff), threshold, need))
     else:
         print("\n没有找到 A 的基线", BASELINE, "，只能报 B 的绝对值")
     return 0
