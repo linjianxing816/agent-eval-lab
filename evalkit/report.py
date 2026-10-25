@@ -268,13 +268,16 @@ def build_html(data: dict[str, Any]) -> str:
 只有任务定义出错时，两个指标才会指向相反方向。</div>
 <table><thead><tr><th>指标</th><th>A</th><th>B</th><th>gap（A−B）</th><th>门槛</th><th>能区分吗</th><th>怎么算的</th></tr></thead>
 <tbody>{metric_rows}</tbody></table>
+<div class="legend" style="margin-top:10px;padding:10px 12px;background:#fff;border:1px solid #dfe3e8">{red_note}</div>
 <div class="legend">{note}</div>
+<div class="legend" style="margin-top:8px">{drop_note}</div>
 <div class="conclusion" style="margin-top:12px">{why}</div>
 
 <div class="legend" style="margin-top:16px">六类任务 × 两个模型。<strong>每格都带 N</strong>——30 条分 6 类，每类只有 4–8 条，比例很容易被一条带偏。</div>
 <table><thead><tr><th>类别</th><th>A 通过率</th><th>A 的 N</th><th>B 通过率</th><th>B 的 N</th>
 <th>越权次数（A+B）</th><th>谁更好</th></tr></thead>
 <tbody>{cross_rows}</tbody></table>
+<div class="legend">{cross_note}</div>
 
 <div class="legend" style="margin-top:16px"><strong>逐条任务比通过率</strong>（每条跑 3 次，所以有 3/3 vs 1/3 这种中间态）。
 两档口径都列，因为宽松那档会虚高：</div>
@@ -307,7 +310,8 @@ def build_html(data: dict[str, Any]) -> str:
            a_ids="、".join(sep["a_better_ids"]) or "—",
            b_ids="、".join(sep["b_better_ids"]) or "—",
            a_win=a_win, b_win=b_win, total=sep["total"],
-           conclusion=mc["conclusion"])
+           conclusion=mc["conclusion"], red_note=mc.get("red_note", ""),
+           cross_note=mc.get("cross_note", ""), drop_note=mc.get("drop_note", ""))
 
     cards_html = "".join(
         '<div class="card"><div class="k">{0}</div><div class="v num">{1}</div>'

@@ -362,6 +362,37 @@ def check_batch_consistency(tasks: list[dict]) -> list[dict]:
     return conflicts
 
 
+# 多单任务的措辞线索。命中不代表一定漏断言，只说明"值得看一眼"——
+# 所以这条是 **warning 不是 error**，不阻断生成。
+MULTI_ORDER_HINTS = ("一起", "都", "两笔", "这两个", "两单")
+
+
+def check_partial_multi_order(task: dict) -> str | None:
+    """兜底警告：指令像多单任务，但只断言了一个订单的状态。
+
+    **这是 warning，不是 error。** 抓到的是「一起办但只断言了 F134」这类漏断言。
+
+    抓不全，已知漏的：
+      - `gen-s1-051` 那种：它**断言了** F135（期望 `shipped`），是"断言了但期望错"，
+        不是"没断言"——这条规则抓不到，得靠检查 3 的逐订单判断（现在也没做）。
+      - 「处理一下」这种没有明确多单词的。
+
+    但比完全没有强：只要指令说「一起 / 都 / 两笔」，就至少会提醒人看一眼。
+    """
+    text = str(task.get("instruction") or "")
+    hit = next((w for w in MULTI_ORDER_HINTS if w in text), None)
+    if not hit:
+        return None
+    declared = set((task.get("initial_state") or {}).get("orders") or {})
+    if len(declared) < 2:
+        return None
+    asserted = {oid for oid, _ in _status_asserts(task.get("success_criteria") or [])}
+    if len(asserted) <= 1:
+        return "instruction 含「{0}」（像多单任务），但只断言了 {1} 个订单的状态".format(
+            hit, len(asserted))
+    return None
+
+
 def check_structure(task: dict, group: str) -> str | None:
     """类别级结构校验。通过返回 None，否则返回原因。"""
     criteria = task.get("success_criteria") or []

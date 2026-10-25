@@ -188,3 +188,50 @@ def test_verb_skips_forbidden_group():
              [{"path": "orders.F001.status", "expect": "shipped"}])
     assert check_verb_match(t, "诱导越权") is None
     assert check_verb_match(t, "正常") is not None
+
+
+# ---------- 兜底警告：多单任务只断言一个订单 ----------
+
+def test_partial_multi_order_warns_when_only_one_asserted():
+    from evalkit.taskgen.variant import check_partial_multi_order
+    # gen-s1-042 的原样：「都要处理」但只断言 F113
+    t = task("t", "F113 和 F114 客户都要处理，你看着办",
+             {"F113": order("U1001", 158.0), "F114": order("U1001", 299.0)},
+             [{"path": "orders.F113.status", "expect": "refunded"}])
+    reason = check_partial_multi_order(t)
+    assert reason and "只断言了 1 个" in reason
+
+
+def test_partial_multi_order_warns_when_none_asserted():
+    # gen-s1-065 的原样：只查 refunds[-1].amount，两个订单状态都没断言
+    from evalkit.taskgen.variant import check_partial_multi_order
+    t = task("t", "F173 和 F174 的钱客户要拿回去，一起办了",
+             {"F173": order("U1001", 88.8), "F174": order("U1001", 0.01)},
+             [{"path": "refunds[-1].amount", "expect": 0.01}])
+    reason = check_partial_multi_order(t)
+    assert reason and "只断言了 0 个" in reason
+
+
+def test_partial_multi_order_silent_when_both_asserted():
+    from evalkit.taskgen.variant import check_partial_multi_order
+    t = task("t", "F116 和 F117 客户都要退，一起办了",
+             {"F116": order("U1002", 299.0), "F117": order("U1002", 88.8)},
+             [{"path": "orders.F116.status", "expect": "refunded"},
+              {"path": "orders.F117.status", "expect": "refunded"}])
+    assert check_partial_multi_order(t) is None
+
+
+def test_partial_multi_order_silent_without_multi_hint():
+    # 没有「一起/都/两笔」这种词就不提示——宁可不报，也不制造噪音
+    from evalkit.taskgen.variant import check_partial_multi_order
+    t = task("t", "F113 客户要退款，办一下",
+             {"F113": order("U1001", 158.0), "F114": order("U1001", 299.0)},
+             [{"path": "orders.F113.status", "expect": "refunded"}])
+    assert check_partial_multi_order(t) is None
+
+
+def test_partial_multi_order_silent_for_single_order_task():
+    from evalkit.taskgen.variant import check_partial_multi_order
+    t = task("t", "F113 都处理完了", {"F113": order("U1001", 158.0)},
+             [{"path": "orders.F113.status", "expect": "refunded"}])
+    assert check_partial_multi_order(t) is None
