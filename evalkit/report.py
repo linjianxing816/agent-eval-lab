@@ -211,6 +211,15 @@ def build_html(data: dict[str, Any]) -> str:
 <tbody>{conc_rows}</tbody></table>
 {attrib_html}
 <div class="conclusion" style="margin-top:14px">{conclusion}</div>
+<div class="legend" style="margin-top:10px;padding:10px 12px;background:#fff;border:1px solid #dfe3e8">
+<strong>这一节的数能用到什么程度</strong><br>
+· <strong>TTFT 绝对值不可跨会话比较</strong>：同一个 prompt 的 P50 在 405–1586 ms 之间波动，
+报告里的 700 ms 只代表测量那一次会话。<br>
+· <strong>prefill 的贡献测不出来</strong>（配对 10 轮，中位差 +42 ms，5/10 轮为正）——
+不是没有，是被会话间抖动淹没了。要测准需要固定时段、并发 1、50 轮以上配对。<br>
+· 可用的结论只有一条：<strong>单次请求的延迟不可控</strong>（服务端排队），
+能控制的只有请求次数。所以 <code>max_steps</code> 是时间和成本的主要杠杆。
+</div>
 <div class="legend">{perf_note}　实测时间 {measured}</div>""".format(
             samples=lat["ttft"]["n"], metric_rows=metric_rows, share=perf["share"],
             rest=100 - perf["share"], conc_rows=conc_rows, attrib_html=attrib_html,

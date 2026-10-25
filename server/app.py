@@ -12,13 +12,15 @@ Agent 配置直接用 `discriminate.AGENTS`。任何"顺手优化一下"都会�
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import time
 from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi.concurrency import run_in_threadpool
+from fastapi.responses import FileResponse, JSONResponse
 from pydantic import BaseModel
 
 from evalkit.agent.loop import run_task
@@ -35,6 +37,10 @@ STATIC = Path(__file__).resolve().parent / "static"
 TASK_FILES = ("tasks/human40.jsonl", "tasks/gen_s2.jsonl")
 
 app = FastAPI(title="LLM Agent 评测平台")
+
+# 后端并发锁。前端那把锁只在浏览器里有效——直接打 API、或者开两个标签页，
+# 就会同时发两次请求，一起打模型 API（很容易 429，而且两条轨迹会互相污染上下文）。
+_run_lock = asyncio.Lock()
 
 
 class RunRequest(BaseModel):
@@ -107,8 +113,19 @@ def get_run(name: str) -> dict[str, Any]:
 
 
 @app.post("/api/run")
-def run_one(payload: RunRequest) -> dict[str, Any]:
-    """真跑一条任务。同步返回——一条约 5–8 秒，前端显示 loading 就够，不做异步轮询。"""
+async def run_one(payload: RunRequest) -> Any:
+    """真跑一条任务。同步返回——一条约 5–8 秒，前端显示 loading 就够，不做异步轮询。
+
+    **用 async def + 线程池**：`run_task` 是阻塞的，直接在事件循环里跑会把整个服务卡住
+    （连 429 都返回不了）。放到线程池里，锁才拦得住第二个请求。
+    """
+    if _run_lock.locked():
+        return JSONResponse({"error": "已有任务在运行，请等待"}, status_code=429)
+    async with _run_lock:
+        return await run_in_threadpool(_execute_run, payload)
+
+
+def _execute_run(payload: RunRequest) -> dict[str, Any]:
     tasks = _load_all_tasks()
     task = tasks.get(payload.task_id)
     if task is None:
@@ -146,6 +163,7 @@ def run_one(payload: RunRequest) -> dict[str, Any]:
             for step in sandbox.trajectory()
         ],
         "final_state": state.data,
+        "final_content": (result.final_content or "")[:500],
         "prompt_tokens": sum(result.per_step_tokens),
         "completion_tokens": sum(result.per_step_completion_tokens),
         "wall_ms": round(wall_ms, 1),

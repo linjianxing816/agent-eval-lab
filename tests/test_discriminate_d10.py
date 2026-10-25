@@ -158,3 +158,31 @@ def test_small_gap_inside_noise_is_not_reported_as_direction():
     assert 0.28 < row["threshold"] < 0.33
     assert abs(row["gap"]) < row["threshold"]
     assert "噪声" in row["direction"] and "未达显著" in row["direction"]
+
+
+def test_outcome_stores_truncated_final_content():
+    # 重判 hallucinated_result / premature_finish 要看模型说了什么，必须落盘
+    from evalkit.client import FakeClient
+    from evalkit.discriminate import run_one
+    long_reply = "已处理完毕。" + "很长的解释" * 200
+    client = FakeClient([{"role": "assistant", "content": long_reply}])
+    task = {"id": "t", "instruction": "查一下", "success_criteria": [
+        {"path": "orders.A123.status", "expect": "shipped"}], "constraints": {"max_steps": 3}}
+    outcome = run_one(task, {"name": "full", "system_prompt": "s", "tools": []}, client, 0)
+    assert len(outcome.final_content) == 500
+    assert outcome.final_content.startswith("已处理完毕")
+
+
+def test_old_logs_without_final_content_load_as_empty(tmp_path):
+    # 542 条旧轨迹没有这个字段，读的时候按空字符串处理，不能报错
+    import json as _json
+    from evalkit.build_report import load_outcomes
+    path = tmp_path / "old.jsonl"
+    path.write_text(_json.dumps({
+        "task_id": "t1", "agent": "strong", "run": 0, "ok": True, "passed": True,
+        "category": None, "steps": 1, "prompt_tokens": 10, "completion_tokens": 2,
+        "trajectory": [], "final_state": {},
+    }, ensure_ascii=False) + "\n", encoding="utf-8")
+    rows = load_outcomes(path)
+    assert rows[0].final_content == ""
+    assert rows[0].agent == "full"          # 旧名字顺便被映射成新名字

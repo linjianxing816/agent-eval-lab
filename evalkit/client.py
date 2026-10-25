@@ -104,6 +104,26 @@ def load_settings(env_path: Path | None = None) -> Settings:
     )
 
 
+def load_model_b_settings(env_path: Path | None = None) -> Settings:
+    """第二个被测模型（D22）。没配就抛 MissingConfigError，消息里只说变量名。
+
+    **和 A 用同一套 loop / system prompt / 工具 schema**，只换 model + key + base_url——
+    否则"哪个模型更好"和"哪套配置更好"就混在一起了。
+    """
+    path = ENV_PATH if env_path is None else env_path
+    if path.exists():
+        load_dotenv(path, override=True)
+    missing = [k for k in ("MODEL_B_BASE_URL", "MODEL_B_API_KEY", "MODEL_B_MODEL")
+               if not (os.environ.get(k) or "").strip()]
+    if missing:
+        raise MissingConfigError("缺少配置项: " + ", ".join(missing) + " （检查 .env）")
+    return Settings(
+        base_url=os.environ["MODEL_B_BASE_URL"].strip(),
+        api_key=os.environ["MODEL_B_API_KEY"].strip(),
+        model=os.environ["MODEL_B_MODEL"].strip(),
+    )
+
+
 def chat_url(base_url: str) -> str:
     """拼出 chat/completions 地址。层级由 .env 负责，这里不补 /v1。"""
     stripped = base_url.strip().rstrip("/")

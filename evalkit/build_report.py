@@ -62,6 +62,8 @@ def load_outcomes(path: Path) -> list[Outcome]:
             prompt_tokens=raw["prompt_tokens"], completion_tokens=raw["completion_tokens"],
             trajectory=tuple(raw.get("trajectory") or ()),
             final_state=raw.get("final_state"),
+            # 旧日志没有这个字段 → 空字符串，不报错
+            final_content=raw.get("final_content") or "",
         ))
     return rows
 

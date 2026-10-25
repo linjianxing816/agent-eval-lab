@@ -127,6 +127,10 @@ class Outcome:
     # D14 轨迹查看器用。默认空，不影响已有调用。
     trajectory: tuple = ()
     final_state: dict | None = None
+    # 模型最后一轮说的话。**重判 hallucinated_result / premature_finish 必须要它**——
+    # 这两类判据看的是"有没有声称完成"，没存就永远复现不了。
+    # 截断到 500 字：完整回答动辄上千字，落盘会把日志撑大一个量级，而判据只需要开头。
+    final_content: str = ""
 
     @property
     def tokens(self) -> int:
@@ -158,6 +162,7 @@ def run_one(task: dict, agent: dict, client: ModelClient, run_index: int) -> Out
         completion_tokens=sum(result.per_step_completion_tokens),
         trajectory=tuple(step_as_dict(step) for step in sandbox.trajectory()),
         final_state=state.data,
+        final_content=(result.final_content or "")[:500],
     )
 
 

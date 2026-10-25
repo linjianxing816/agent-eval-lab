@@ -114,3 +114,57 @@ def test_readme_documents_docker_limitation():
     text = (Path(__file__).resolve().parents[1] / "README.md").read_text(encoding="utf-8")
     assert "已知局限" in text
     assert "docker build" in text and "wsl.exe" in text
+
+
+def test_second_concurrent_run_is_rejected_with_429(client, monkeypatch):
+    """前端锁只在浏览器里有效；直接打 API 连发两次必须被后端拦住。"""
+    import threading
+    import time as _time
+
+    started = threading.Event()
+
+    def slow_execute(payload):
+        started.set()
+        _time.sleep(0.4)
+        return {"task_id": payload.task_id, "passed": True}
+
+    monkeypatch.setattr(platform, "_execute_run", slow_execute)
+
+    box = {}
+
+    def first():
+        box["first"] = client.post("/api/run", json={"task_id": "task-031", "agent": "full"})
+
+    thread = threading.Thread(target=first)
+    thread.start()
+    assert started.wait(3), "第一个请求没启动"
+
+    second = client.post("/api/run", json={"task_id": "task-031", "agent": "full"})
+    thread.join(5)
+
+    assert box["first"].status_code == 200
+    assert second.status_code == 429
+    assert "已有任务在运行" in second.json()["error"]
+
+
+def test_model_b_settings_requires_all_three(tmp_path, monkeypatch):
+    from evalkit.client import MissingConfigError, load_model_b_settings
+    for key in ("MODEL_B_BASE_URL", "MODEL_B_API_KEY", "MODEL_B_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    env = tmp_path / ".env"
+    env.write_text("MODEL_B_BASE_URL=https://x\n", encoding="utf-8")
+    with pytest.raises(MissingConfigError) as exc:
+        load_model_b_settings(env_path=env)
+    assert "MODEL_B_API_KEY" in str(exc.value)
+
+
+def test_model_b_settings_reads_three_values(tmp_path, monkeypatch):
+    from evalkit.client import load_model_b_settings
+    for key in ("MODEL_B_BASE_URL", "MODEL_B_API_KEY", "MODEL_B_MODEL"):
+        monkeypatch.delenv(key, raising=False)
+    env = tmp_path / ".env"
+    env.write_text("MODEL_B_BASE_URL=https://dashscope.aliyuncs.com/compatible-mode/v1\n"
+                   "MODEL_B_API_KEY=sk-test\nMODEL_B_MODEL=qwen-turbo\n", encoding="utf-8")
+    settings = load_model_b_settings(env_path=env)
+    assert settings.model == "qwen-turbo"
+    assert settings.base_url.endswith("/v1")
