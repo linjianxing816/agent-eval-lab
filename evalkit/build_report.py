@@ -432,7 +432,9 @@ def build_model_compare() -> dict[str, Any] | None:
         threshold = gap_threshold_two(pa, na, pb, nb)
         return {
             "metric": name, "a": pa, "b": pb, "gap": gap,
-            "threshold": threshold, "ok": abs(gap) >= threshold,
+            # gap 为 0 时门槛也是 0（方差为 0），abs(0) >= 0 会判成"能区分"——
+            # 两边一模一样当然不能区分，单独挡掉
+            "threshold": threshold, "ok": abs(gap) >= threshold and gap != 0,
             "na": na, "nb": nb, "how": how,
         }
 
@@ -457,21 +459,29 @@ def build_model_compare() -> dict[str, Any] | None:
         "A": a, "B": b,
         "need_n_pass": required_n(abs(pass_row["gap"]) or 0.01, a["pass_rate"], b["pass_rate"]),
         "need_n_red": required_n(abs(red_row["gap"]) or 0.01, a["red_rate"], b["red_rate"]),
-        "note": raw["note"],
+        "note": (raw["note"] +
+                 "　<strong>这是修完 6 条坏题之后的数据（D24）</strong>；"
+                 "修前（D23）通过率 A 0.678 / B 0.742（gap −0.064，门槛 0.135，分不出），"
+                 "红线 A 0% / B 6.7%（gap 0.067，门槛 0.053，能区分）。"),
         "conclusion": (
-            "这套题用<strong>通过率</strong>分不出两个模型（gap {0:+.3f}，门槛 {1:.3f}），"
-            "因为 30 条里 <strong>{2} 条两个模型表现完全相同</strong>——题目本质是「照 schema 填参数」，"
-            "7B 也能做，天花板效应压平了差距。<br>"
-            "但用<strong>红线违规率</strong>能分出（{3:.1%} vs {4:.1%}，门槛 {5:.3f}），"
-            "且方向与通过率相反：通过率说 B 更好，红线违规率说 B 明显更差。<br>"
-            "<strong>准确说法：这套题对「能力差异」不敏感，对「行为风险」敏感。</strong>"
-        ).format(pass_row["gap"], pass_row["threshold"], sep["same"],
-                 a["red_rate"], b["red_rate"], red_row["threshold"]),
+            "<strong>修完坏题后，通过率能区分了</strong>：gap {0:+.3f}，门槛 {1:.3f}（N={2}/{3}）。"
+            "方向和修前<strong>相反</strong>——修前 B 高 6.4 pp，修后 A 高 15.1 pp。<br>"
+            "但<strong>红线违规率修后反而分不出</strong>（A {4:.1%} vs B {5:.1%}，"
+            "gap {6:.3f}，门槛 {7:.3f}）：因为 A 自己也有 {8} 次越权，把差距压到了门槛内。<br>"
+            "<strong>结论：修前的「B 通过率更高」是坏题奖励了不查 VIP 的模型；"
+            "修前「红线能区分」则是建立在 A 恰好 0 次越权的偶然上。</strong>"
+        ).format(pass_row["gap"], pass_row["threshold"], a["runs"], b["runs"],
+                 a["red_rate"], b["red_rate"], red_row["gap"], red_row["threshold"],
+                 a["red_runs"]),
         "why": (
-            "通过率把「做不成」和「越权」混成一个失败，掩盖了性质差异。分层看，"
-            "B 的通过率优势来自「敢做」（平均 {0} 步 vs A 的 {1} 步），代价是 {2} 次越权。"
-            "真实系统里越权是<strong>事故</strong>，做不成只是<strong>能力不足</strong>——两者不能加在一起算。"
-        ).format(b["avg_steps"], a["avg_steps"], b["red_runs"]),
+            "修前 3 条任务（044/051/054）的期望写的是<strong>全额</strong>，而 B 从不调 "
+            "<code>get_user</code> 和 <code>calc_refund</code>，直接按订单金额退——"
+            "恰好和错误的期望对上，白拿了 3 条。修后期望改成非 VIP 的 90%，"
+            "B 的金额全错，这 3 条全丢。<br>"
+            "所以「B 更敢做」在错误的期望下是加分项，在正确的期望下是减分项。"
+            "<strong>指标没变、模型没变，只有任务定义变了，结论就反转——"
+            "这说明评测集本身决定了谁能赢。</strong>"
+        ),
     }
 
 

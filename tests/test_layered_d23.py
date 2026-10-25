@@ -103,3 +103,35 @@ def test_cross_table_carries_n_for_every_cell():
     assert row["A"]["red"] == 3
     empty = next(r for r in table if r["scenario"] == "多步依赖")
     assert empty["A"]["n"] == 0 and empty["A"]["pass"] is None
+
+
+def test_zero_gap_is_never_reported_as_separable():
+    # 两边都是 0% 时，门槛也是 0（方差为 0），abs(0) >= 0 会误判成"能区分"
+    import json
+    from pathlib import Path
+
+    import evalkit.build_report as br
+
+    real = br.RESULTS / "model_compare.json"
+    original = real.read_text(encoding="utf-8") if real.exists() else None
+    try:
+        real.write_text(json.dumps({
+            # 0.95 vs 0.70：gap 0.25 > 门槛 0.107，才算"能区分"
+            "A": {"runs": 90, "pass_rate": 0.95, "red_rate": 0.0, "halluc_rate": 0.0,
+                  "malformed_rate": 0.0, "avg_steps": 3.0, "red_runs": 0, "red_task_runs": {}},
+            "B": {"runs": 90, "pass_rate": 0.70, "red_rate": 0.0, "halluc_rate": 0.0,
+                  "malformed_rate": 0.0, "avg_steps": 3.0, "red_runs": 0, "red_task_runs": {}},
+            "cross": [], "note": "",
+            "separability": {"total": 30, "same": 30, "a_better": 0, "b_better": 0,
+                             "separable": 0, "separable_strict": 0,
+                             "a_full_win": [], "b_full_win": [],
+                             "a_better_ids": [], "b_better_ids": [], "uneven": []},
+        }, ensure_ascii=False), encoding="utf-8")
+        mc = br.build_model_compare()
+        by_name = {r["metric"]: r for r in mc["rows"]}
+        assert by_name["格式错误率"]["gap"] == 0.0
+        assert by_name["格式错误率"]["ok"] is False      # 0 差异不算能区分
+        assert by_name["通过率"]["ok"] is True
+    finally:
+        if original is not None:
+            real.write_text(original, encoding="utf-8")

@@ -23,8 +23,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 RESULTS = Path("results")
-LOG_A = RESULTS / "modela_auto_full_90.jsonl"
-LOG_B = RESULTS / "modelb_auto_full.jsonl"
+# **默认读修后（D24）**：2026-10-25 修了 6 条坏题之后的数据。
+# 修前的对比用 `scripts/compare_fix.py`（它同时读两批）。
+# 可以用环境变量覆盖，方便以后换批次：
+#   LOG_A=results/xxx.jsonl LOG_B=results/yyy.jsonl python scripts/analyze_layered.py
+import os
+LOG_A = Path(os.environ.get("LOG_A", RESULTS / "d24_modela.jsonl"))
+LOG_B = Path(os.environ.get("LOG_B", RESULTS / "d24_modelb.jsonl"))
 TASKS = Path("tasks/gen_s2.jsonl")
 
 # 6 类任务的展示顺序：从"最该出事"到"最不该出事"
