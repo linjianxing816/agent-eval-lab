@@ -4,6 +4,8 @@
 
 不是"用任务集测模型"，是"**测任务集**"。
 
+`Python/FastAPI + SQLite + Function Calling + SSE 流式 + 多模型适配`
+
 ```
 两个模型 × 90 次执行，同一套 30 条任务
 
@@ -122,6 +124,9 @@ Qwen2.5-7B      0.558       12.8%
 ## 怎么跑
 
 ```bash
+# 初始化数据库（jsonl → SQLite，幂等，可重复跑）
+python scripts/migrate_to_db.py
+
 # 测试（不需要 API key，不联网）
 python -m pytest tests -q
 
@@ -152,9 +157,9 @@ python -m uvicorn server.app:app --host 127.0.0.1 --port 8010
 evalkit/         评测库（环境、循环、判定、指标、生成器、质检、报告）
 server/          平台（FastAPI + 单页前端）
 tasks/           任务集（人工 42 条 + 自动生成 100 条 + 探针）
-results/         日志、报告页、perf 数据
+results/         日志、报告页、perf 数据、evalkit.db（SQLite）
 docs/            契约、任务格式、场景说明、开发日志（21 条踩坑）
-tests/           257 条测试，全部离线（FakeClient / MockTransport）
+tests/           314 条测试，全部离线（FakeClient / MockTransport）
 ```
 
 ---

@@ -114,6 +114,118 @@ def _step_range(rows: list[TaskResult]) -> dict:
     return {"min": min(steps), "max": max(steps), "mean": _mean([float(s) for s in steps])}
 
 
+def load_run_results(source: str = "auto", engine=None,
+                     batches: tuple[str, ...] | None = None) -> list[TaskResult]:
+    """**这是 metrics.py 里唯一碰 IO 的函数**，其余全是纯函数。
+
+    为什么加它：数据源从 jsonl 换成 DB 了，但**统计逻辑一行没改**——
+    `compute()` 还是那个纯函数，只是输入从"读文件拼出来的 list"变成"查库拼出来的 list"。
+    契约第一节「metrics.py 纯函数不碰 IO」的实质是"算的部分不碰 IO"，
+    数据加载放在这里，边界清楚。
+
+    `source`：
+    - `"db"`：只读库，读不到就返回空（调用方自己决定怎么办）
+    - `"jsonl"`：只读文件（迁移前的行为，测试和回滚用）
+    - `"auto"`：优先库，库空就回退文件——**默认这个**，保证现有流程不断
+
+    【DB 里没有的字段】
+    `tool_rounds` / `tool_calls_total` / `tool_time_ms` 从 steps 表聚合出来；
+    `llm_time_ms` / `wall_time_ms` 日志里本来就没存，填 0——
+    它们只影响 `llm_time_ratio`，而这个指标现在不报（只报 token）。
+    """
+    wanted = batches or ("d26_modela", "d26_modelb")
+    if source in ("auto", "db"):
+        try:
+            rows = _load_from_db(engine, wanted)
+        except Exception:
+            if source == "db":
+                raise
+            rows = []
+        if rows:
+            return rows
+        if source == "db":
+            return []
+    return _load_from_jsonl(wanted)
+
+
+def _load_from_db(engine, batches: tuple[str, ...]) -> list[TaskResult]:
+    from sqlalchemy import bindparam, text
+
+    from evalkit.db import get_engine
+
+    eng = engine or get_engine()
+    stmt = text("""
+        SELECT r.task_id, r.passed, r.category, r.severity, r.steps,
+               r.prompt_tokens, r.completion_tokens, t.source,
+               COUNT(s.id) AS tool_calls, COALESCE(SUM(s.elapsed_ms), 0) AS tool_ms
+        FROM runs r
+        JOIN tasks t ON r.task_id = t.id
+        LEFT JOIN steps s ON s.run_id = r.id
+        WHERE r.batch IN :batches
+        GROUP BY r.id, r.task_id, r.passed, r.category, r.severity, r.steps,
+                 r.prompt_tokens, r.completion_tokens, t.source
+        ORDER BY r.batch, r.task_id, r.run_index
+    """).bindparams(bindparam("batches", expanding=True))
+    with eng.connect() as conn:
+        rows = conn.execute(stmt, {"batches": list(batches)}).fetchall()
+    return [TaskResult(
+        task_id=r[0], passed=bool(r[1]), category=r[2], severity=r[3] or "passed",
+        source=r[7], steps=int(r[4] or 0),
+        # 一步 = 一次 LLM 往返，日志里没有独立的轮次字段，用 steps 近似
+        tool_rounds=int(r[4] or 0), tool_calls_total=int(r[8] or 0),
+        prompt_tokens=int(r[5] or 0), completion_tokens=int(r[6] or 0),
+        tool_time_ms=float(r[9] or 0.0),
+    ) for r in rows]
+
+
+def _load_from_jsonl(batches: tuple[str, ...]) -> list[TaskResult]:
+    """迁移前的路径。**读同一批文件**，保证 DB 坏了还能出数。
+
+    severity 和 DB 路径用**同一个** `severity_from_row()`——
+    两条路径各写一份的话，`critical_failed` 会算出不同的数。
+    """
+    import json
+    from pathlib import Path
+
+    from evalkit.db import severity_from_row
+
+    root = Path(__file__).resolve().parent.parent
+    task_source: dict[str, str] = {}
+    task_by_id: dict[str, dict] = {}
+    for path, label in ((root / "tasks/human40.jsonl", "human"),
+                        (root / "tasks/gen_s2.jsonl", "generated")):
+        if path.exists():
+            for line in path.read_text(encoding="utf-8").splitlines():
+                if line.strip():
+                    task = json.loads(line)
+                    task_source[task["id"]] = label
+                    task_by_id[task["id"]] = task
+
+    out: list[TaskResult] = []
+    for batch in batches:
+        path = root / "results" / "{0}.jsonl".format(batch)
+        if not path.exists():
+            continue
+        for line in path.read_text(encoding="utf-8").splitlines():
+            if not line.strip():
+                continue
+            row = json.loads(line)
+            steps = row.get("trajectory") or []
+            out.append(TaskResult(
+                task_id=row["task_id"], passed=bool(row["passed"]),
+                category=row.get("category"),
+                severity=severity_from_row(row, task_by_id.get(row["task_id"], {})),
+                source=task_source.get(row["task_id"], "generated"),
+                steps=int(row.get("steps") or 0),
+                tool_rounds=int(row.get("steps") or 0),
+                tool_calls_total=len(steps),
+                prompt_tokens=int(row.get("prompt_tokens") or 0),
+                completion_tokens=int(row.get("completion_tokens") or 0),
+                tool_time_ms=sum(float(s.get("elapsed_ms") or 0.0) for s in steps),
+            ))
+    return out
+
+
 def compute(results: list[TaskResult], price: dict | None = None) -> dict[str, Any]:
     """汇总所有指标。
 

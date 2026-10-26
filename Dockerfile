@@ -11,5 +11,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 COPY . .
 
+# 存储层：**不传这个变量也能跑**，默认 SQLite 落在 results/evalkit.db。
+# 用 PostgreSQL 时（schema 和查询都是方言无关的，换库不用改代码）：
+#   1. 装驱动：pip install "psycopg[binary]"
+#   2. 起库：docker run -d -e POSTGRES_PASSWORD=evalkit -p 5432:5432 postgres:16
+#   3. 传连接串：docker run -e DATABASE_URL=postgresql://postgres:evalkit@host.docker.internal:5432/postgres evalkit
+ENV DATABASE_URL=sqlite:///results/evalkit.db
+
 # 测试全是离线的（FakeClient / MockTransport），不需要 API key
 CMD ["python", "-m", "pytest", "tests", "-q"]

@@ -24,6 +24,7 @@ python-dotenv==1.2.4
 PyYAML==6.0.3
 rich==15.0.0
 shellingham==1.5.4
+sqlalchemy==2.1.6
 starlette==1.10.0
 typer==0.27.3
 typing-inspection==0.4.4

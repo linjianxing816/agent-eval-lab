@@ -27,6 +27,7 @@ from evalkit.discriminate import (
     token_mean,
     type_of,
 )
+from evalkit.db_queries import available_batches, load_outcomes as load_outcomes_db
 from evalkit.gate import evaluate, gap_threshold_two, required_n
 from evalkit.report import write_report
 
@@ -35,21 +36,49 @@ COLOR_ACTION = "#1f5fbf"
 COLOR_UNCHANGED = "#c77700"
 
 
-def load_if_exists(path: Path) -> list[Outcome]:
-    return load_outcomes(path) if path.exists() else []
+def load_batch(name: str) -> list[Outcome]:
+    """**数据从哪来的唯一入口**：优先 DB，DB 里没这个批次就回退 jsonl。
 
+    为什么保留 fallback：
+    - 库文件没生成（新 clone 下来还没跑迁移）时报告不能白屏
+    - 回滚只要删掉 `results/evalkit.db`，一行代码不用改
 
-def merge_override(base: list[Outcome], override: list[Outcome]) -> list[Outcome]:
-    """用新数据**替换**同 task_id 的旧记录。
-
-    改了 instruction 就必须重跑那条（judge 不读 instruction，光重判没用），
-    重跑后旧记录作废——两份都留着会把同一任务算两遍。
+    为什么要按批次判断"库里有不有"：`build_report` 用了 14 个批次，
+    将来只迁了一部分的话，缺的那几个回退 jsonl，其余走库——
+    **不能因为一个批次没迁就让整份报告崩掉**。
     """
-    touched = {o.task_id for o in override}
-    return [o for o in base if o.task_id not in touched] + override
+    if name in _db_batches():
+        rows = load_outcomes_db((name,))
+        if rows:
+            return rows
+    return load_jsonl_batch(RESULTS / "{0}.jsonl".format(name))
 
 
-def load_outcomes(path: Path) -> list[Outcome]:
+_DB_BATCHES: list[str] | None = None
+
+
+def _db_batches() -> list[str]:
+    global _DB_BATCHES
+    if _DB_BATCHES is None:
+        try:
+            _DB_BATCHES = available_batches()
+        except Exception:                      # 库不存在 / 驱动缺失 → 全走 jsonl
+            _DB_BATCHES = []
+    return _DB_BATCHES
+
+
+def load_if_exists(path: Path) -> list[Outcome]:
+    """兼容旧调用：传路径的，按文件名推批次名。"""
+    return load_batch(path.stem)
+
+
+def load_jsonl_batch(path: Path) -> list[Outcome]:
+    """读一个 jsonl 批次文件。文件不存在返回空（不抛）。"""
+    return _read_jsonl(path) if path.exists() else []
+
+
+def _read_jsonl(path: Path) -> list[Outcome]:
+    """读一个 jsonl 文件。**迁移前的数据源**，现在只在 DB 缺这个批次时用。"""
     rows = []
     for line in path.read_text(encoding="utf-8").splitlines():
         if not line.strip():
@@ -69,16 +98,32 @@ def load_outcomes(path: Path) -> list[Outcome]:
     return rows
 
 
+def load_outcomes(path: Path) -> list[Outcome]:
+    """兼容别名：老代码按路径调它。**读的是 jsonl**，不是 DB——
+    要读 DB 用 `load_batch(批次名)`。保留它只是不让旧测试 import 失败。"""
+    return _read_jsonl(path)
+
+
+def merge_override(base: list[Outcome], override: list[Outcome]) -> list[Outcome]:
+    """用新数据**替换**同 task_id 的旧记录。
+
+    改了 instruction 就必须重跑那条（judge 不读 instruction，光重判没用），
+    重跑后旧记录作废——两份都留着会把同一任务算两遍。
+    """
+    touched = {o.task_id for o in override}
+    return [o for o in base if o.task_id not in touched] + override
+
+
 def build_diff() -> dict[str, Any]:
     human = load_tasks("tasks/human40.jsonl")
     auto = sample_tasks(load_tasks("tasks/gen_s2.jsonl"), seed=2024)
     sets = {
         "人工集(42)": {"tasks": human,
-                       "full": load_outcomes(RESULTS / "d13b_human_strong.jsonl"),
-                       "no_order_info": load_outcomes(RESULTS / "d13b_human_weak.jsonl")},
+                       "full": load_batch("d13b_human_strong"),
+                       "no_order_info": load_batch("d13b_human_weak")},
         "自动集(30 抽样)": {"tasks": auto,
-                            "full": load_outcomes(RESULTS / "d13_auto_strong.jsonl"),
-                            "no_order_info": load_outcomes(RESULTS / "d13_auto_weak.jsonl")},
+                            "full": load_batch("d13_auto_strong"),
+                            "no_order_info": load_batch("d13_auto_weak")},
     }
     report = diff_sets(sets)
     (RESULTS / "diff.json").write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -812,17 +857,17 @@ def main() -> None:
 
     # D15 扩样本：只跑了要做事组（57 条 × 2 次 / 22 条 × 3 次）
     d15 = {
-        "人工": {"full": load_if_exists(RESULTS / "d15_human_strong.jsonl"),
-                 "no_order_info": load_if_exists(RESULTS / "d15_human_weak.jsonl")},
-        "自动": {"full": load_if_exists(RESULTS / "d15_auto_strong.jsonl"),
-                 "no_order_info": load_if_exists(RESULTS / "d15_auto_weak.jsonl")},
+        "人工": {"full": load_batch("d15_human_strong"),
+                 "no_order_info": load_batch("d15_human_weak")},
+        "自动": {"full": load_batch("d15_auto_strong"),
+                 "no_order_info": load_batch("d15_auto_weak")},
     }
     # D16：重跑 task-035（改了 instruction）+ 自动集最后一次加样本
     d16 = {
-        "人工": {"full": load_if_exists(RESULTS / "d16_human_strong.jsonl"),
-                 "no_order_info": load_if_exists(RESULTS / "d16_human_weak.jsonl")},
-        "自动": {"full": load_if_exists(RESULTS / "d16_auto_strong.jsonl"),
-                 "no_order_info": load_if_exists(RESULTS / "d16_auto_weak.jsonl")},
+        "人工": {"full": load_batch("d16_human_strong"),
+                 "no_order_info": load_batch("d16_human_weak")},
+        "自动": {"full": load_batch("d16_auto_strong"),
+                 "no_order_info": load_batch("d16_auto_weak")},
     }
     # 人工集：task-035 用新记录替换旧的；自动集：两批样本**相加**（不同 run，不重复）
     action = {
@@ -831,10 +876,10 @@ def main() -> None:
     }
     # 不该动组没重跑，从 D13 全量日志里挑
     old = {
-        "人工": {"full": load_outcomes(RESULTS / "d13b_human_strong.jsonl"),
-                 "no_order_info": load_outcomes(RESULTS / "d13b_human_weak.jsonl")},
-        "自动": {"full": load_outcomes(RESULTS / "d13_auto_strong.jsonl"),
-                 "no_order_info": load_outcomes(RESULTS / "d13_auto_weak.jsonl")},
+        "人工": {"full": load_batch("d13b_human_strong"),
+                 "no_order_info": load_batch("d13b_human_weak")},
+        "自动": {"full": load_batch("d13_auto_strong"),
+                 "no_order_info": load_batch("d13_auto_weak")},
     }
     tasks_of = {"人工": human_tasks, "自动": auto_tasks}
     all_tasks_of = {"人工": human_all, "自动": auto_all}

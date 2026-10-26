@@ -13,7 +13,9 @@
 from __future__ import annotations
 
 import json
+import logging
 import os
+import random
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,16 +29,73 @@ CONNECT_TIMEOUT = 10.0
 PLACEHOLDER_KEY = "sk-在这里填你的key"
 ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 
+logger = logging.getLogger("evalkit.client")
+
+# ---------- 重试策略 ----------
+# **哪些能重试**：这类错误过一会儿大概率就好了。
+#   429 限流、5xx 服务端抖动、超时、连接错误
+# **哪些不能**：重试一百次也是同样的结果，只会把时间浪费掉。
+#   400 参数错、401/403 鉴权、404 路径错
+RETRYABLE_STATUS = frozenset({429, 500, 502, 503, 504})
+MAX_RETRIES = 3
+BASE_DELAY_S = 1.0
+# **抖动必须有**：并发跑批时多个请求会同时撞上 429，
+# 固定间隔会让它们在同一毫秒一起重试，二次打爆上游。
+JITTER_RATIO = 0.2
+
 
 class ChatError(RuntimeError):
     """请求失败：超时 / 网络 / HTTP 非 200 / 响应结构异常。
 
     `status` 只在拿到 HTTP 状态码时非空（429 要靠它统计，不能靠解析文案）。
+    `retryable` 由抛出点显式给：`None` 表示"没判过"，重试层按 status 兜底。
     """
 
-    def __init__(self, message: str, status: int | None = None) -> None:
+    def __init__(self, message: str, status: int | None = None,
+                 retryable: bool | None = None) -> None:
         super().__init__(message)
         self.status = status
+        self.retryable = retryable
+
+
+@dataclass(frozen=True)
+class RetryEvent:
+    """一次重试的记录。测试和日志都用它，**不靠解析日志文本**。"""
+
+    attempt: int          # 第几次重试，1-based
+    reason: str           # "HTTP 429" / "请求超时" / "网络错误"
+    delay_s: float        # 这次退避了多久
+    status: int | None
+
+
+def backoff_delay(attempt: int, rng: random.Random | None = None) -> float:
+    """第 `attempt` 次重试前等多久：1s → 2s → 4s，每次 ±20% 抖动。
+
+    抖动是**乘法**（`base × (1 ± 0.2)`）不是加法：间隔越长抖得越多，
+    这样 4 秒那次能把同时重试的请求摊开 1.6 秒，1 秒那次摊开 0.4 秒。
+    """
+    base = BASE_DELAY_S * (2 ** (attempt - 1))
+    span = base * JITTER_RATIO
+    generator = rng or random
+    return round(base + generator.uniform(-span, span), 3)
+
+
+def _is_retryable(exc: ChatError) -> bool:
+    """能不能重试。抛出处已经判过就用它的结论，没判过按状态码兜底。
+
+    **兜底只看状态码，不看 message**：靠中文字符串匹配"超时"太脆，
+    换个措辞就失效。真正需要重试的超时/网络错误在抛出处已经标了 `retryable=True`。
+    """
+    if exc.retryable is not None:
+        return exc.retryable
+    return exc.status is not None and exc.status in RETRYABLE_STATUS
+
+
+def _reason_of(exc: ChatError) -> str:
+    """日志和 `RetryEvent` 里用的短原因。有状态码就用状态码，没有就截消息。"""
+    if exc.status is not None:
+        return "HTTP {0}".format(exc.status)
+    return str(exc)[:40]
 
 
 class MissingConfigError(RuntimeError):
@@ -140,7 +199,8 @@ class ModelClient(Protocol):
 class DeepSeekClient:
     def __init__(self, settings: Settings, thinking: bool = False,
                  timeout: float = DEFAULT_TIMEOUT, transport: httpx.BaseTransport | None = None,
-                 max_tokens: int = 1024) -> None:
+                 max_tokens: int = 1024, max_retries: int = MAX_RETRIES,
+                 sleep_fn=None) -> None:
         self._settings = settings
         self._thinking = thinking
         self._timeout = timeout
@@ -150,6 +210,11 @@ class DeepSeekClient:
         # 复用一个 httpx.Client：每次新建的话每次都要重新做 TCP + TLS 握手，
         # 那部分时间会全部算进 TTFT。实测见 results/perf.json 的 before/after。
         self._http: httpx.Client | None = None
+        self.max_retries = max_retries
+        # **每次重试都记一条**，测试和"重试到底救回了多少"的分析都读它
+        self.retry_events: list[RetryEvent] = []
+        # 测试注入 `lambda _: None` 跳过真实等待；生产用 time.sleep
+        self._sleep = sleep_fn or time.sleep
 
     def _client(self) -> httpx.Client:
         """懒创建并复用。第一次调用才建，避免只构造不请求的场景白占连接。"""
@@ -173,6 +238,39 @@ class DeepSeekClient:
         self.close()
 
     def chat(self, messages: list[dict], tools: list[dict]) -> ChatReply:
+        """带指数退避重试的 chat。**上层调用方一行都不用改。**
+
+        重试三层判断：
+        1. 这次错误可不可重试（`ChatError.retryable`，抛出处已经判好）
+        2. 还有没有重试次数（最多 `max_retries` 次）
+        3. 退避多久（1s → 2s → 4s，±20% 抖动）
+
+        最后一次失败时抛原异常——**不包一层"重试失败"**，
+        否则上层拿到的 `status` 就丢了，429 统计会归零。
+        """
+        attempt = 0
+        while True:
+            try:
+                reply = self._chat_once(messages, tools)
+            except ChatError as exc:
+                if not _is_retryable(exc) or attempt >= self.max_retries:
+                    if attempt:
+                        logger.error("[retry] 重试 %d 次仍失败，放弃：%s", attempt, exc)
+                    raise
+                attempt += 1
+                delay = backoff_delay(attempt)
+                self.retry_events.append(RetryEvent(
+                    attempt=attempt, reason=_reason_of(exc), delay_s=delay,
+                    status=getattr(exc, "status", None)))
+                logger.warning("[retry %d/%d] %s | 退避 %.2fs",
+                               attempt, self.max_retries, _reason_of(exc), delay)
+                self._sleep(delay)
+                continue
+            if attempt:
+                logger.info("[retry] 第 %d 次重试成功", attempt)
+            return reply
+
+    def _chat_once(self, messages: list[dict], tools: list[dict]) -> ChatReply:
         payload = {
             "model": self._settings.model,
             "messages": messages,
@@ -188,22 +286,27 @@ class DeepSeekClient:
         try:
             resp = self._client().post(chat_url(self._settings.base_url), json=payload, headers=headers)
         except httpx.TimeoutException as exc:
-            raise ChatError("请求超时（>{0:.0f}s），检查网络或代理".format(self._timeout)) from exc
+            raise ChatError("请求超时（>{0:.0f}s），检查网络或代理".format(self._timeout),
+                            retryable=True) from exc
         except httpx.HTTPError as exc:
-            raise ChatError("网络错误: {0}: {1}".format(type(exc).__name__, exc)) from exc
+            raise ChatError("网络错误: {0}: {1}".format(type(exc).__name__, exc),
+                            retryable=True) from exc
         elapsed_ms = (time.perf_counter() - started) * 1000
         self.last_elapsed_ms = elapsed_ms
         if resp.status_code != 200:
             # 不带 body：401/403 的 body 可能回显 key
             hint = "多半是 base_url 层级填错" if resp.status_code == 404 else "常见原因：key 无效 / 额度不足 / 限流"
-            raise ChatError("HTTP {0}: {1}".format(resp.status_code, hint), status=resp.status_code)
+            raise ChatError("HTTP {0}: {1}".format(resp.status_code, hint),
+                            status=resp.status_code,
+                            retryable=resp.status_code in RETRYABLE_STATUS)
         try:
             data = resp.json()
             message = data["choices"][0]["message"]
         except (ValueError, KeyError, IndexError, TypeError) as exc:
-            raise ChatError("响应结构异常，取不到 choices[0].message") from exc
+            # 结构异常不重试：要么是厂商改了协议，要么是网关塞了 HTML，重试还是同一个结果
+            raise ChatError("响应结构异常，取不到 choices[0].message", retryable=False) from exc
         if not isinstance(message, dict):
-            raise ChatError("choices[0].message 不是对象")
+            raise ChatError("choices[0].message 不是对象", retryable=False)
         return ChatReply(message=message, elapsed_ms=elapsed_ms, usage=data.get("usage") or {})
 
 
