@@ -115,7 +115,10 @@ def run_task(client: ModelClient, sandbox: Sandbox, *, instruction: str, system_
         except ChatError as exc:
             # 带上步数：D4 记 request_error 时要区分「跑到一半断了」和「第一步就没通」——
             # 前者说明前几步的动作已经发生在环境里，后者什么都没做。
-            raise ChatError("第 {0} 步请求失败: {1}".format(step, exc)) from exc
+            # **status 必须原样带走**：包装时丢了它，上层就只能看到 request_error，
+            # 429（限流）和超时（网络）分不开，并发扫描没法判断哪一档把上游打爆了。
+            raise ChatError("第 {0} 步请求失败: {1}".format(step, exc),
+                            status=getattr(exc, "status", None)) from exc
         per_step_tokens.append(int(reply.usage.get("prompt_tokens", 0) or 0))
         per_step_completion.append(int(reply.usage.get("completion_tokens", 0) or 0))
         per_step_ms.append(float(reply.elapsed_ms))

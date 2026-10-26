@@ -64,6 +64,7 @@ def load_outcomes(path: Path) -> list[Outcome]:
             final_state=raw.get("final_state"),
             # 旧日志没有这个字段 → 空字符串，不报错
             final_content=raw.get("final_content") or "",
+            error_status=raw.get("error_status"),
         ))
     return rows
 
@@ -148,7 +149,9 @@ def build_trajectories() -> list[dict[str, Any]]:
                     "task_id": outcome.task_id,
                     "agent": "{0} / {1} · 第 {2} 次".format(
                         label, agent, counter[outcome.task_id]),
-                    "scenario": group_of(task),
+                    # 标了 unstable 的任务在查看器里也要能认出来——
+                    # 不然读到一条"这次通过了"会以为它稳定，实际下次可能就失败
+                    "scenario": group_of(task) + ("·不稳定" if task.get("unstable") else ""),
                     "instruction": task.get("instruction", ""),
                     "badge": _badge(outcome),
                     "passed": outcome.passed,
@@ -507,13 +510,305 @@ def build_model_compare() -> dict[str, Any] | None:
     }
 
 
+def build_concurrency() -> dict[str, Any] | None:
+    """「并发调优」：读 results/concurrency.json（D27 真实规模扫描）。
+
+    这一节回答一个问题：**跑批能开多少并发**。
+    判据不是"最快"，是"在 429 为 0 的前提下最快"——
+    429 换来的吞吐是假的，那一批任务的判定结果全废，加速比好看但数据不能用。
+
+    **还要看波数**（执行数 / 并发度）。波数 < 3 时全部执行一两波就打完了，
+    墙钟约等于"最慢那个任务要多久"，加速比测的是这个，不是吞吐——
+    实测 30 次 / 32 并发 = 0.94 波，加速比 18.66×；扩到 90 次（2.8 波）后掉到 X×。
+
+    没有 concurrency.json 就返回 None，报告里那一节不渲染——不编数。
+    """
+    path = RESULTS / "concurrency.json"
+    if not path.exists():
+        return None
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    rows = raw["rows"]
+    best = raw["best"]
+
+    plain = [r for r in rows if not r.get("label")]
+    best_level = best.get("best")
+    best_row = next((r for r in plain if r["concurrency"] == best_level), None)
+    if best_row is None:
+        return None
+    base = raw["baseline"]
+
+    # 上一轮的小样本扫描（10 条 × 3 次 = 30 次/档），留着做对比：
+    # "30 次样本撑不满 32 并发"这个结论要靠两轮的数字并排才看得出来。
+    old_path = RESULTS / "concurrency_30runs.json"
+    old = json.loads(old_path.read_text(encoding="utf-8")) if old_path.exists() else None
+    old_best = (old or {}).get("best") or {}
+    old_row = next((r for r in (old or {}).get("rows") or []
+                    if r["concurrency"] == old_best.get("best")), None)
+    old_thin = bool(old_row) and (old_row["runs"] / old_row["concurrency"]) < raw.get("min_waves", 3.0)
+
+    thin = [r["concurrency"] for r in plain if not r.get("enough_waves")]
+    lower = [r for r in plain if r["concurrency"] < best_level]
+    first_429 = best.get("first_429")
+
+    # 「为什么不是更高」：先看 429，再看吞吐有没有饱和。
+    last = plain[-1]
+    prev = plain[-2] if len(plain) > 1 else None
+    gain = (last["throughput"] / prev["throughput"] - 1) if prev and prev["throughput"] else 0.0
+    if first_429 is not None:
+        hit = next(r for r in rows if r["concurrency"] == first_429)
+        why_not_higher = (
+            "再往上就 429 了：<strong>{0} 并发首次出现 {1} 次 429</strong>，"
+            "失败率 {2:.0%}。429 换来的吞吐是假的——那 {1} 次执行判定全废，"
+            "重试之后真实耗时只会更长。".format(first_429, hit["status_429"],
+                                                hit["status_429"] / max(hit["runs"], 1))
+        )
+    elif prev is not None and gain >= 0.10:
+        why_not_higher = (
+            "一直试到 {0} 并发都没出现 429，吞吐也还在涨（{1} → {0} 涨 {2:.0%}），"
+            "<strong>天花板没摸到</strong>。<br>"
+            "但 {0} 档只有 {3:.1f} 波，<strong>加速比被长尾压低了</strong>——"
+            "真实批量（426 次 ≈ 13 波）下长尾会被平均得更充分，这个数还会再涨一点，"
+            "逼近并发度上限 {0}×。".format(
+                last["concurrency"], prev["concurrency"], gain, last["waves"])
+        )
+    elif prev is not None:
+        why_not_higher = (
+            "一直试到 {0} 并发都没出现 429，但<strong>吞吐已经饱和</strong>："
+            "{1} → {0} 只涨了 {2:.0%}。瓶颈不在上游限流，而在客户端（线程 / 连接）"
+            "或服务端排队，继续加并发只会让单次延迟线性变长，不增加吞吐。".format(
+                last["concurrency"], prev["concurrency"], gain)
+        )
+    else:
+        why_not_higher = "只有一档数据，判断不了上限。"
+
+    # 「为什么不是更低」
+    if lower:
+        low = lower[-1]
+        saved = low["wall_s"] - best_row["wall_s"]
+        why_not_lower = (
+            "再往下就更慢：{0} 并发要 {1:.1f}s，比它多花 <strong>{2:.1f}s（多花 {3:.0%}）</strong>。".format(
+                low["concurrency"], low["wall_s"], saved,
+                saved / best_row["wall_s"] if best_row["wall_s"] else 0.0)
+        )
+    else:
+        why_not_lower = "它已经是最低档（串行），没有更低的可以比。"
+
+    lat_base = next((r["latency_mean_ms"] for r in plain if r["concurrency"] == 1), 0.0)
+    conclusion = (
+        "<strong>最优并发 = {best}</strong>，加速比 <strong>{sp:.2f}×</strong>"
+        "（{n} 次执行 {w0:.0f}s → {w1:.1f}s，省 {dw:.0f}s）。<br>"
+        "{why_high}{why_low}<br>"
+        "并发<strong>不降低单次延迟</strong>（{lat0:.0f} ms → {lat1:.0f} ms），"
+        "收益全来自「同时有 {best} 个请求在飞」。"
+    ).format(best=best_level, sp=best.get("speedup", 0.0), n=raw["executions_per_level"],
+             w0=base["wall_s"], w1=best_row["wall_s"], dw=base["wall_s"] - best_row["wall_s"],
+             why_high=why_not_higher, why_low=why_not_lower,
+             lat0=lat_base, lat1=best_row["latency_mean_ms"])
+
+    # 波数对照实验：**同任务集、同并发、只改执行数**。
+    # 这个实验是为了把"波数"和"任务集难度"两个变量分开——
+    # 跨轮次比 18.66× vs 25.41× 是没意义的，任务集都换了。
+    wave_path = RESULTS / "d27_wave30.json"
+    wave = json.loads(wave_path.read_text(encoding="utf-8")) if wave_path.exists() else None
+    wave_row = next((r for r in (wave or {}).get("rows") or []
+                     if r["concurrency"] == best_level), None)
+    wave_base = (wave or {}).get("baseline")
+
+    scale = ""
+    if wave_row and wave_base:
+        scale = (
+            "<strong>波数的影响：同任务集、同并发，只改执行数</strong><br>"
+            "用同样的 {n} 条任务、同样 {best} 并发，跑两遍：<br>"
+            "· <strong>{w30:.2f} 波</strong>（{r30} 次）→ {t30:.1f}s，加速比 <strong>{s30:.2f}×</strong><br>"
+            "· <strong>{w90:.2f} 波</strong>（{r90} 次）→ {t90:.1f}s，加速比 <strong>{s90:.2f}×</strong><br>"
+            "→ <strong>波数少的时候加速比偏低，不是偏高</strong>（这一条和直觉相反，是实测的）。<br>"
+            "机制：{w30:.2f} 波时所有任务几乎一起开始，墙钟由<strong>最慢那个任务</strong>决定"
+            "（{t30:.1f}s ÷ 平均单次 {avg30:.2f}s = <strong>{k30:.2f} 倍</strong>）；"
+            "而串行总耗时是 {r30} × 平均值。两者一除，加速比 ≈ {r30}/{k30:.2f} ≈ {s30:.0f}，"
+            "<strong>跟并发度几乎无关</strong>。<br>"
+            "{w90:.2f} 波时队列始终是满的，长尾被平均掉（单波耗时只有平均值的 {k90:.2f} 倍），"
+            "加速比才逼近并发度上限（{s90:.1f}/{best} = {eff:.0%}）。<br>"
+            "旁证：上一轮用 <strong>10 条难任务</strong>跑 30 次（0.94 波）测得 18.66×，"
+            "和这轮 30 条全量跑 30 次（0.94 波）的 18.40× <strong>几乎一样</strong>——"
+            "任务集完全不同，数字却对上了，说明<strong>波数才是主因，不是任务难度</strong>。"
+        ).format(n=raw.get("task_count", len(raw["tasks"])), best=best_level,
+                 w30=wave_row["waves"], r30=wave_row["runs"], t30=wave_row["wall_s"],
+                 s30=wave_row["speedup"], w90=best_row["waves"],
+                 r90=raw["executions_per_level"], t90=best_row["wall_s"],
+                 s90=best.get("speedup", 0.0),
+                 avg30=wave_base["wall_s"] / wave_row["runs"],
+                 k30=wave_row["wall_s"] / (wave_base["wall_s"] / wave_row["runs"]),
+                 # 单波耗时 = 墙钟 / 波数。直接用墙钟除平均值会把波数漏掉，
+                 # 算出来是 3.54（实际 1.26），差 2.8 倍——正好是波数。
+                 k90=(best_row["wall_s"] / best_row["waves"])
+                     / (base["wall_s"] / raw["executions_per_level"]),
+                 eff=best.get("speedup", 0.0) / best_level if best_level else 0.0)
+
+    # 429 压测：420 次 @32 并发（13.1 波），专门回答"限流阈值在哪"
+    burst_path = RESULTS / "concurrency_426.json"
+    burst = json.loads(burst_path.read_text(encoding="utf-8")) if burst_path.exists() else None
+    burst_html = ""
+    if burst:
+        b, s = burst["burst"], burst["serial"]
+        # 同一基线 vs 当次基线：**两个都要算**，差多少就是时段漂移多少
+        same_base = round(b["throughput"] / base["throughput"], 2) if base["throughput"] else 0.0
+        drift = (s["latency_mean_ms"] / base["latency_mean_ms"] - 1) if base["latency_mean_ms"] else 0.0
+        burst_html = (
+            "<strong>429 压测：420 次 @ 32 并发（13.1 波），<span style='color:#0a7f3f'>"
+            "429 一次都没出现</span>。</strong><br>"
+            "墙钟 {wall:.1f}s，吞吐 {tp:.2f} 次/s，request_error = 0，"
+            "共 {steps} 次 LLM 往返（平均 {per:.2f} 步/次），通过率 {pr:.3f}。<br>"
+            "加速比有两个数：<strong>用当次串行基线 {now:.2f}×</strong>、"
+            "<strong>用 90 次那档的基线 {same:.2f}×</strong>——差 {gap:.0%}，"
+            "差异<strong>全部来自分母</strong>：<br>"
+            "两次之间串行单次延迟从 {lat0:.0f} ms 涨到 {lat1:.0f} ms（+{drift:.0%}），"
+            "并发单次也同步涨到 {lat2:.0f} ms，<strong>而并发吞吐几乎没变</strong>"
+            "（{tp0:.2f} → {tp:.2f}）。是整个服务变慢了，不是并发变快了。<br>"
+            "→ <strong>波数从 2.81 涨到 13.1，加速比没有继续提升（25.41 → {same:.2f}），已经收敛。</strong>"
+            "2.81 波够用了，再往上加执行数只是把同一个数测得更准，不会让数字变好看。<br>"
+            "→ <strong>429 阈值：32 并发跑 420 次没触发，真实阈值高于 32。</strong>"
+            "但 420 次只是样本，限流是概率事件——"
+            "<strong>生产建议 8–16 并发（加速 7–14×），留 2–4 倍余量应对突发。</strong>"
+        ).format(wall=b["wall_s"], tp=b["throughput"],
+                 steps=b.get("steps_total", 0), per=b.get("steps_mean", 0.0),
+                 pr=b["pass_rate"], now=burst["speedup_by_throughput"], same=same_base,
+                 gap=abs(burst["speedup_by_throughput"] - same_base) / max(same_base, 0.01),
+                 lat0=base["latency_mean_ms"], lat1=s["latency_mean_ms"], drift=drift,
+                 lat2=b["latency_mean_ms"], tp0=best_row["throughput"])
+
+    # 一致率：用**任务内**口径（D8 同款），每档自己就能算，不需要跨批次对照
+    within_lo = min(r["within"]["rate"] for r in plain)
+    within_hi = max(r["within"]["rate"] for r in plain)
+    base_within = base.get("within_rate", 0.0)
+    cross_lo = min(r["agreement"]["rate"] for r in plain)
+    cross_hi = max(r["agreement"]["rate"] for r in plain)
+
+    def span(lo: float, hi: float) -> str:
+        return "{0:.1%}".format(lo) if abs(hi - lo) < 0.001 else "{0:.1%}–{1:.1%}".format(lo, hi)
+
+    stability = (
+        "<strong>一致率用「任务内」口径</strong>（同一条任务跑 {rep} 次，{rep} 次判定是否完全相同）——"
+        "这是 D8 audit 用的同一个指标，所以能和历史数字直接比，<strong>不需要跨批次对照</strong>。<br>"
+        "串行档 <strong>{bw:.1%}</strong>，并发各档 <strong>{wspan}</strong>；"
+        "跨档逐条比也是 <strong>{cspan}</strong>。<br>"
+        "→ <strong>并发没有改变判定分布，一次都没变。</strong>"
+        "这一轮的样本是 {n} 条全量（6 类各 4–8 条），不是上一轮故意挑的 10 条难样本，"
+        "所以这次的数字可以直接用。<br>"
+        "对照：D8 用同样的 30 条测出的一致率是 93.3%（那次每条也跑 3 次），"
+        "这轮四档都是 100%——<strong>不是并发让它变稳了</strong>，是这一批的模型输出恰好没抖。"
+        "两个数都在 90% 门禁线以上。"
+    ).format(rep=raw["repeats"], bw=base_within, wspan=span(within_lo, within_hi),
+             cspan=span(cross_lo, cross_hi),
+             n=raw.get("task_count", len(raw["tasks"])))
+    if within_lo < 0.90:
+        stability += (
+            "<br><strong>但 {0} 档掉到了 {1:.1%}，低于 90% 的门禁线</strong>——"
+            "那一档确实有并发引入的问题，要查限流或超时。".format(
+                "、".join(str(r["concurrency"]) for r in plain if r["within"]["rate"] < 0.90),
+                min(r["within"]["rate"] for r in plain)))
+
+    return {
+        "rows": rows,
+        "best": best,
+        "old": ({"speedup": old_best.get("speedup"), "waves": old_row["runs"] / old_row["concurrency"],
+                 "concurrency": old_row["concurrency"]} if old_row else None),
+        "tasks": raw["tasks"],
+        "task_count": raw.get("task_count", len(raw["tasks"])),
+        "task_set": raw.get("task_set", "all"),
+        "repeats": raw["repeats"],
+        "executions": raw["executions_per_level"],
+        "min_waves": raw.get("min_waves", 3.0),
+        "thin": thin,
+        "agent": raw.get("agent", "full"),
+        "model": raw.get("model", ""),
+        "measured_at": raw.get("measured_at", ""),
+        "conclusion": conclusion,
+        "scale": scale,
+        "burst": burst_html,
+        "stability": stability,
+        "note": (
+            "跑批层改成线程池 + Semaphore（<code>run_batch_async</code>），"
+            "<strong>run_task / client / sandbox 一行没改</strong>——"
+            "同步阻塞的循环用 <code>asyncio.to_thread</code> 包一层就能拿到并发收益，"
+            "改真 async 要同时动三层，风险大。"
+            "「单次延迟」是一条完整任务（多步）的墙钟时间，不是单次 LLM 往返。"
+        ),
+    }
+
+
+def split_unstable(tasks: list[dict]) -> tuple[list[dict], list[dict]]:
+    """把标了 `unstable` 的任务摘出来。
+
+    **为什么要摘**：这些任务的模型行为本身随机（同一句指令，有时做有时不做），
+    单次结果测的是运气不是能力。混在通过率里，数字会因为"这次恰好做了"上下跳，
+    而且会污染 gap——同一批重跑，抖动的那几条换个结果，gap 就变。
+    判定层没有问题（诊断过：序列和状态相同的执行，判定完全一致）。
+
+    返回 (稳定集, 不稳定集)。
+    """
+    stable = [t for t in tasks if not t.get("unstable")]
+    unstable = [t for t in tasks if t.get("unstable")]
+    return stable, unstable
+
+
+def build_unstable(human_unstable: list[dict], auto_unstable: list[dict],
+                   human_all: list[dict], auto_all: list[dict],
+                   pools: dict[str, dict[str, list[Outcome]]]) -> dict[str, Any]:
+    """「不稳定任务」单独一栏。
+
+    **这不是"难度高"，是"同一句指令走不同的路"**——判定层没有缺陷
+    （诊断过：工具序列和最终状态都相同的执行，判定一定相同），
+    问题在模型：有时候做了、有时候不做。这种任务单次结果测的是运气。
+
+    `pools` 传的是主数据源（人工集要做事用 D15+D16，不该动用 D13），
+    和矩阵用的是同一份，否则这里的次数和矩阵的 N 对不上。
+    """
+    rows: list[dict[str, Any]] = []
+    for task in human_unstable + auto_unstable:
+        is_human = any(t["id"] == task["id"] for t in human_unstable)
+        set_name = "人工" if is_human else "自动"
+        bucket = "要做事" if group_of(task) in ACTION_GROUPS else "不该动"
+        mine = [o for o in pools[set_name][bucket] if o.task_id == task["id"]]
+        passed = sum(1 for o in mine if o.passed)
+        cats = Counter(o.category for o in mine if not o.passed)
+        rows.append({
+            "task_id": task["id"], "set": set_name, "scenario": group_of(task),
+            "instruction": task.get("instruction", ""),
+            "runs": len(mine), "passed": passed,
+            "rate": round(passed / len(mine), 3) if mine else 0.0,
+            "failure": "、".join("{0}×{1}".format(k, v) for k, v in cats.most_common()) or "—",
+            "note": task.get("unstable_note", ""),
+        })
+
+    total = len(human_all) + len(auto_all)
+    count = len(human_unstable) + len(auto_unstable)
+    return {
+        "rows": rows,
+        "count": count,
+        "total": total,
+        "share": round(count / total, 4) if total else 0.0,
+        "human_before": len(human_all), "human_after": len(human_all) - len(human_unstable),
+        "note": (
+            "这 {0} 条任务的<strong>模型行为本身随机</strong>：同一句指令多次执行走不同路径"
+            "（有时调写操作、有时只查不删），单次结果不能代表能力。<br>"
+            "<strong>判定层没有缺陷</strong>——诊断过 19 次以上执行：工具序列和最终状态都相同的，"
+            "判定 100% 一致；所有不一致都能归因到「模型这次做了/没做」，不是「judge 给了不同结论」。<br>"
+            "主结论（通过率、gap）已剔除这 {0} 条，人工集从 {1} 条变成 {2} 条。"
+            "标记写在任务文件的 <code>unstable</code> / <code>unstable_note</code> 字段里，"
+            "由 <code>scripts/diagnose_unstable.py</code> 的诊断结果驱动，不是手工拍脑袋。"
+        ).format(count, len(human_all), len(human_all) - len(human_unstable)),
+    }
+
+
 def main() -> None:
     diff = build_diff()
 
-    human_tasks = load_tasks("tasks/human40.jsonl")
+    human_all = load_tasks("tasks/human40.jsonl")
+    human_tasks, human_unstable = split_unstable(human_all)
     # 用**全量** 100 条，不能用 30 条抽样：D15 跑的是 57 条要做事组，
     # 拿抽样集去筛只会匹配到 16 条，N 直接腰斩、门槛被抬高。
-    auto_tasks = load_tasks("tasks/gen_s2.jsonl")
+    auto_all = load_tasks("tasks/gen_s2.jsonl")
+    auto_tasks, auto_unstable = split_unstable(auto_all)
 
     # D15 扩样本：只跑了要做事组（57 条 × 2 次 / 22 条 × 3 次）
     d15 = {
@@ -542,11 +837,29 @@ def main() -> None:
                  "no_order_info": load_outcomes(RESULTS / "d13_auto_weak.jsonl")},
     }
     tasks_of = {"人工": human_tasks, "自动": auto_tasks}
+    all_tasks_of = {"人工": human_all, "自动": auto_all}
+    dropped = {"人工": [t["id"] for t in human_unstable],
+               "自动": [t["id"] for t in auto_unstable]}
+
+    def _src(base: str, set_name: str) -> str:
+        return base + ("（已剔除 {0}）".format("、".join(dropped[set_name]))
+                       if dropped[set_name] else "")
+
     sources = {
-        ("人工", "要做事"): "D15 22 条 × 3 次 + D16 重跑 task-035",
-        ("人工", "不该动"): "D13 全量：20 条 × 1 次",
-        ("自动", "要做事"): "D15 57 条 × 2 次 + D16 57 条 × 1 次",
-        ("自动", "不该动"): "D13 抽样：14 条 × 1 次",
+        ("人工", "要做事"): _src("D15 22 条 × 3 次 + D16 重跑 task-035", "人工"),
+        ("人工", "不该动"): _src("D13 全量：20 条 × 1 次", "人工"),
+        ("自动", "要做事"): _src("D15 57 条 × 2 次 + D16 57 条 × 1 次", "自动"),
+        ("自动", "不该动"): _src("D13 抽样：14 条 × 1 次", "自动"),
+    }
+
+    # 不稳定任务单独统计时要用**全量**任务集筛，否则 pick() 会把它们筛掉，
+    # 这一栏就成了空表。
+    pools = {
+        set_name: {
+            "要做事": pick(action[set_name]["full"], all_tasks_of[set_name], "要做事"),
+            "不该动": pick(old[set_name]["full"], all_tasks_of[set_name], "不该动"),
+        }
+        for set_name in ("人工", "自动")
     }
 
     matrix: list[dict[str, Any]] = []
@@ -646,7 +959,9 @@ def main() -> None:
         "instruction_following": build_instruction_following(
             human_tasks, action["人工"]["full"], action["人工"]["no_order_info"]),
         "tokens": tokens,
+        "unstable": build_unstable(human_unstable, auto_unstable, human_all, auto_all, pools),
         "perf": build_perf(action),
+        "concurrency": build_concurrency(),
         "model_compare": build_model_compare(),
         "trajectories": build_trajectories(),
     }

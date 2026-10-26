@@ -163,3 +163,54 @@ def sweep_concurrency(call_factory: Callable[[], Callable[[], float]],
             status_429=status_429, other_errors=other,
         ))
     return [row.as_dict() for row in rows]
+
+
+def pick_best_concurrency(rows: list[dict[str, Any]]) -> dict[str, Any]:
+    """最优并发 = **在 429 为 0 的前提下最快**，不是最快。
+
+    为什么不选最快：429 意味着这一档的吞吐是拿"失败请求"换的。
+    失败重试之后真实耗时只会更长，而且失败请求里那些任务的判定结果全废了——
+    加速比好看，但那一批数据不能用。
+
+    优先级（逐级放宽，每级都记下放宽原因）：
+    1. 429 = 0 且 request_error = 0 → 首选。超时也算不稳定，理由同上。
+    2. 429 = 0 但有 request_error → 退而求其次，取 request_error 最少的。
+    3. 全部有 429 → 取 429 最少的，并在结论里明说"没找到干净的一档"。
+
+    `first_429` 是**第一个出现 429 的档位**，用来回答"为什么不是更高"：
+    最优必须严格小于它。
+    """
+    if not rows:
+        return {"best": None, "reason": "没有数据", "first_429": None, "clean": []}
+
+    ordered = sorted(rows, key=lambda r: r["concurrency"])
+    first_429 = next((r["concurrency"] for r in ordered if r.get("status_429", 0) > 0), None)
+
+    def pick(candidates: list[dict], why: str) -> dict[str, Any]:
+        # 吞吐相同时取并发更小的：同样快就用更少的连接，对上游更友好
+        best = max(candidates, key=lambda r: (r["throughput"], -r["concurrency"]))
+        return {"best": best["concurrency"], "why": why, "row": best}
+
+    clean = [r for r in ordered if r.get("status_429", 0) == 0 and r.get("request_error", 0) == 0]
+    if clean:
+        picked = pick(clean, "429 和 request_error 都是 0 的档里吞吐最高")
+    else:
+        no_429 = [r for r in ordered if r.get("status_429", 0) == 0]
+        if no_429:
+            fewest = min(r.get("request_error", 0) for r in no_429)
+            picked = pick([r for r in no_429 if r.get("request_error", 0) == fewest],
+                          "没有一档做到 request_error=0；在 429=0 的档里取失败最少的（{0} 条）".format(fewest))
+        else:
+            fewest = min(r.get("status_429", 0) for r in ordered)
+            picked = pick([r for r in ordered if r.get("status_429", 0) == fewest],
+                          "每一档都出现 429；取 429 最少的（{0} 次）——这一档的数据只能当参考".format(fewest))
+
+    return {
+        "best": picked["best"],
+        "why": picked["why"],
+        "row": picked["row"],
+        "first_429": first_429,
+        "clean": [r["concurrency"] for r in clean],
+        "strictly_below_429": (first_429 is None) or (picked["best"] < first_429),
+    }
+

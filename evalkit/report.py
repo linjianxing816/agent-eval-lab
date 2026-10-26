@@ -226,6 +226,83 @@ def build_html(data: dict[str, Any]) -> str:
             conclusion=perf["conclusion"], perf_note=perf["note"],
             measured=perf["measured_at"])
 
+    conc = data.get("concurrency")
+    conc_block = ""
+    if conc:
+        best_level = conc["best"].get("best")
+        min_waves = conc.get("min_waves", 3.0)
+        conc_rows = "".join(
+            "<tr{cls}><td class='n'>{label}</td><td class='n'>{wall:.1f}s</td>"
+            "<td class='n'>{tp:.2f}</td><td class='n'>{sp:.2f}×</td><td class='n'{wcls}>{waves:.2f}</td>"
+            "<td class='n'{e429}>{n429}</td><td class='n'>{err}</td>"
+            "<td class='n'>{lat:.0f}</td><td class='n'>{within:.0%}</td>"
+            "<td class='n'>{cross:.0%}</td><td>{tag}</td></tr>".format(
+                cls=" style='background:#eef7f0'" if r["concurrency"] == best_level and not r.get("label") else "",
+                label=str(r["concurrency"]) + ("（复测）" if r.get("label") else ""),
+                wall=r["wall_s"], tp=r["throughput"], sp=r["speedup"],
+                waves=r.get("waves", 0.0),
+                wcls=" style='color:#8a5a00;font-weight:600'" if not r.get("enough_waves", True) else "",
+                n429=r["status_429"],
+                e429=" style='color:#b3261e;font-weight:600'" if r["status_429"] else "",
+                err=r["request_error"], lat=r["latency_mean_ms"],
+                within=r["within"]["rate"], cross=r["agreement"]["rate"],
+                tag=("最优" if r["concurrency"] == best_level and not r.get("label")
+                     else ("<span style='color:#5b6470'>基线（和自己比，恒 100%）</span>"
+                           if r["concurrency"] == 1 and not r.get("label")
+                           else ("<span style='color:#8a5a00'>样本不足，加速比偏高</span>"
+                                 if not r.get("enough_waves", True) else ""))),
+            )
+            for r in conc["rows"]
+        )
+        conc_block = """<h2>{no}、并发调优</h2>
+<div class="conclusion">{conclusion}</div>
+<div class="legend" style="margin:0 0 12px;padding:10px 12px;background:#fff;border-left:4px solid #c77700;border-radius:6px">{scale}</div>
+<div class="legend" style="margin:0 0 12px;padding:10px 12px;background:#fff;border-left:4px solid #0a7f3f;border-radius:6px">{burst}</div>
+<table><thead><tr><th>并发</th><th>总耗时</th><th>吞吐（执行/s）</th><th>加速比</th><th>波数</th>
+<th>429</th><th>request_error</th><th>单次延迟（ms）</th><th>任务内一致率</th><th>跨档一致率</th><th></th></tr></thead>
+<tbody>{rows}</tbody></table>
+<div class="legend" style="margin-top:10px;padding:10px 12px;background:#fff;border-left:4px solid #1f5fbf;border-radius:6px">{stability}</div>
+<div class="legend" style="margin-top:10px;padding:10px 12px;background:#fff;border:1px solid #dfe3e8">
+<strong>这一节的数怎么读</strong><br>
+· <strong>波数 = 执行数 ÷ 并发度</strong>，是这个表里最容易被忽略的一列。
+波数 &lt; {minw:.0f} 时全部执行一两波就打完了，墙钟约等于「最慢那个任务要多久」，
+<strong>加速比测的是这个，不是吞吐，所以偏低</strong>（不是偏高——实测 0.94 波 18.40×、2.81 波 25.41×）。<br>
+· <strong>两个一致率口径不同</strong>：任务内 = 同一条跑 3 次判定是否相同（D8 同款，每档自己算）；
+跨档 = 和串行档逐条比（混着模型自己的随机性）。<strong>前者才是「并发有没有影响」的答案。</strong><br>
+· <strong>单次延迟会变长</strong>，这是正常的——{best} 个请求同时在排队。收益来自并发数，不来自单次变快。<br>
+· {note}
+</div>""".format(no=("十" if perf else "九"), conclusion=conc["conclusion"],
+                 rows=conc_rows, scale=conc.get("scale", ""),
+                 burst=conc.get("burst", ""),
+                 stability=conc.get("stability", ""), note=conc["note"],
+                 minw=min_waves, best=conc["best"].get("best"))
+
+    # 不稳定任务单独一栏。**不是"难度高"，是"同一句指令走不同的路"**——
+    # 放在矩阵下面，因为读者看到 N 变小会先问"为什么"。
+    unstable = data.get("unstable") or {"rows": [], "count": 0, "share": 0.0,
+                                        "total": 0, "note": ""}
+    unstable_block = ""
+    if unstable.get("rows"):
+        unstable_rows = "".join(
+            "<tr><td>{0}</td><td>{1}</td><td>{2}</td><td class='hint'>{3}</td>"
+            "<td class='n'>{4}</td><td class='n'>{5}</td><td class='n'>{6:.0%}</td>"
+            "<td class='hint'>{7}</td></tr>".format(
+                r["task_id"], r["set"], r["scenario"], r["instruction"],
+                r["runs"], r["passed"], r["rate"], r["failure"])
+            for r in unstable["rows"]
+        )
+        unstable_block = """<div class="legend" style="margin-top:18px;padding:12px 14px;background:#fff;
+border-left:4px solid #c77700;border-radius:6px">
+<strong>不稳定任务：{count} 条，占全部 {total} 条的 {share:.0%}</strong><br>{note}</div>
+<table style="margin-top:10px"><thead><tr><th>任务</th><th>集</th><th>类别</th><th>指令</th>
+<th>主数据源里的执行</th><th>通过</th><th>通过率</th><th>失败原因</th></tr></thead>
+<tbody>{rows}</tbody></table>
+<div class="legend">注意「执行次数」这一列：主数据源里每条只有 1–3 次，
+<strong>根本不够判稳</strong>——真正的证据是诊断脚本跑的 19 次以上执行。
+这一栏的通过率只用来表示"当前数据里它落在哪"，不要当准确值看。</div>""".format(
+            count=unstable["count"], total=unstable["total"], share=unstable["share"],
+            note=unstable["note"], rows=unstable_rows)
+
     strength = data.get("strength") or {"rows": [], "note": "", "need_n": 0}
     strength_rows = "".join(
         "<tr><td>{0}</td><td class='n'>{1}</td><td class='n'>{2:+.4f}</td>"
@@ -350,6 +427,7 @@ N=171 时旧门槛 0.0765、新门槛 0.1056，gap 0.0877 从「过」变成「�
 <tbody>{matrix_rows}</tbody></table>
 <div class="legend">要做事组 gap = p_完整 − p_缺订单信息（正数=缺订单信息的 Agent 做不成事）；
 不该动组 gap = p_缺订单信息 − p_完整（正数=缺订单信息的 Agent 更保守）。两个数不合并。</div>
+{unstable_block}
 <h2>四、样本量与结论强度</h2>
 <table><thead><tr><th>阶段</th><th>N（单 Agent 观测）</th><th>gap</th>
 <th>标准误 ±</th><th>误差带（2×se）</th><th>这个数能说明什么</th></tr></thead>
@@ -373,6 +451,8 @@ N=171 时旧门槛 0.0765、新门槛 0.1056，gap 0.0877 从「过」变成「�
 <div class="legend">{token_note}</div>
 
 {perf_block}
+
+{conc_block}
 
 <h2>{traj_no}、轨迹查看器</h2>
 <div class="viewer">
@@ -422,12 +502,15 @@ if (DATA.length) {{ document.querySelectorAll('.item')[0].click(); }}
 </script>
 </body></html>""".format(css=CSS, meta=data["meta"], banner="".join(banner), cards=cards_html,
                          gate_rows=gate_rows, matrix_rows=matrix_rows, bars=bars,
+                         unstable_block=unstable_block,
                          dist_note=dist["note"], payload=payload,
                          follow_block=follow_block, token_rows=token_rows,
                          token_note=tokens["note"], conclusion=data.get("conclusion", ""),
                          config_note=data.get("config_note", ""),
                          strength_rows=strength_rows, strength_note=strength["note"],
-                         perf_block=perf_block, model_block=model_block, traj_no="十" if perf else "九")
+                         perf_block=perf_block, model_block=model_block,
+                         conc_block=conc_block,
+                         traj_no=("十一" if (perf and conc) else ("十" if (perf or conc) else "九")))
 
 
 def write_report(data: dict[str, Any], out_path: str | Path) -> Path:

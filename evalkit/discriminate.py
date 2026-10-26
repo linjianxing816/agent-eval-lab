@@ -19,7 +19,11 @@
 """
 from __future__ import annotations
 
+import asyncio
+import hashlib
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -131,6 +135,10 @@ class Outcome:
     # 这两类判据看的是"有没有声称完成"，没存就永远复现不了。
     # 截断到 500 字：完整回答动辄上千字，落盘会把日志撑大一个量级，而判据只需要开头。
     final_content: str = ""
+    # HTTP 状态码，只在 ChatError 带 status 时非空（429 靠它数，不能靠解析文案）。
+    # 并发扫描要用它回答"这一档有没有把上游打爆"——category 只有 request_error 一个值，
+    # 429 和超时、断网混在一起，分不开就没法判断"最优并发"该停在哪。
+    error_status: int | None = None
 
     @property
     def tokens(self) -> int:
@@ -151,7 +159,8 @@ def run_one(task: dict, agent: dict, client: ModelClient, run_index: int) -> Out
         )
         verdict = judge_task(task, state.data, result, sandbox.trajectory())
     except ChatError as exc:
-        return Outcome(task["id"], agent["name"], run_index, False, False, "request_error", 0, 0, 0)
+        return Outcome(task["id"], agent["name"], run_index, False, False, "request_error", 0, 0, 0,
+                       error_status=getattr(exc, "status", None))
     except Exception:                              # noqa: BLE001 - 崩了要记，不能中断整批
         return Outcome(task["id"], agent["name"], run_index, False, False, "crash", 0, 0, 0)
     return Outcome(
@@ -193,6 +202,145 @@ def run_batch(tasks: list[dict], agent: dict, client: ModelClient,
                 encoding="utf-8",
             )
     return outcomes
+
+
+async def run_batch_async(tasks: list[dict], agent: dict, client: ModelClient,
+                          repeats: int = 1, concurrency: int = 1,
+                          log: Path | None = None,
+                          timings: dict | None = None,
+                          threads: int | None = None) -> list[Outcome]:
+    """并发跑。**只改跑批层，run_task / client / sandbox 一行没动。**
+
+    【为什么用 `to_thread` 而不是真 async】
+    `run_task` 是同步阻塞的：`httpx.Client.post` 阻塞线程、等模型响应时线程挂着。
+    把它改成真 async 要同时动三层——client 换 `httpx.AsyncClient`、循环改 `await`、
+    sandbox 的工具执行也要保证不阻塞——三层里任何一层漏改，事件循环还是会被卡住，
+    而且"卡住"这件事在测试里很难发现（表面上代码是 `async def`）。
+    `to_thread` 能拿到全部并发收益，代价是线程数上限和每线程一份栈。
+    先要数字，后面真需要再改。
+
+    【Semaphore 管什么】
+    管"同时在飞的请求数"，不是管"同时排队的任务数"。30 个任务一起提交，
+    但最多 `concurrency` 个真正在等模型响应——超了上游会 429，
+    而 429 一出现，这一档的加速比就不能用（成功数是靠失败换来的）。
+
+    【顺序】
+    `gather` 保持入参顺序，所以结果和串行 `run_batch` 逐条对得上：
+    第 k 条永远是 `tasks[k // repeats]` 的第 `k % repeats` 次。
+    一致性验证直接按下标比，不用建索引。
+
+    【`threads`】
+    `asyncio.to_thread` 用事件循环的默认 executor，默认只有 `min(32, cpu+4)` 个 worker。
+    并发开到 16/32 时会被线程池而不是 Semaphore 卡住，测出来的是线程池上限，不是服务端上限。
+    传了 `threads` 就把默认 executor 换掉，让上限由 Semaphore 决定。
+
+    【`timings`】
+    并发下拿不到"总耗时÷条数"以外的单条延迟（串行才能算），所以单条耗时由这里回填，
+    key 是 `(task_id, run)`。写入发生在事件循环线程（`await` 返回之后），不是 worker 线程，不用加锁。
+    """
+    if concurrency < 1:
+        raise ValueError("concurrency 必须 ≥ 1")
+    sem = asyncio.Semaphore(concurrency)
+    loop = asyncio.get_running_loop()
+    if threads:
+        loop.set_default_executor(ThreadPoolExecutor(max_workers=threads))
+
+    async def one(task: dict, run_index: int) -> Outcome:
+        async with sem:
+            started = time.perf_counter()
+            outcome = await asyncio.to_thread(run_one, task, agent, client, run_index)
+            if timings is not None:
+                timings[(task["id"], run_index)] = (time.perf_counter() - started) * 1000
+            return outcome
+
+    outcomes = await asyncio.gather(*(one(t, i) for t in tasks for i in range(repeats)))
+    if log is not None:
+        # 并发下不能边跑边写：多个任务完成顺序不确定，后写的会覆盖先写的。
+        # 全部跑完写一次，内容和不并发的格式一致。
+        log.write_text(
+            "\n".join(json.dumps(o.__dict__, ensure_ascii=False) for o in outcomes) + "\n",
+            encoding="utf-8",
+        )
+    return list(outcomes)
+
+
+def verdict_key(outcome: Outcome) -> tuple:
+    """判定签名：`(passed, category, 最终状态哈希)`。
+
+    **三项都要比。** 只比 `passed` 会把"都通过、但退款金额不同"判成一致——
+    那正是并发最可能引入的问题（限流导致某步重试、超时导致少退一单）。
+    """
+    if outcome.final_state is None:
+        digest = "-"
+    else:
+        body = json.dumps(outcome.final_state, sort_keys=True, ensure_ascii=False, default=str)
+        digest = hashlib.sha1(body.encode("utf-8")).hexdigest()[:12]
+    return (outcome.passed, outcome.category, digest)
+
+
+def within_task_consistency(outcomes: list[Outcome]) -> dict[str, Any]:
+    """**任务内**一致率：同一条任务跑 N 次，N 次判定是否完全相同。
+
+    这是 D8 audit 用的口径（93.3% 那个数），也是回答"并发有没有改变结果"最干净的指标——
+    **每一档自己就能算，不需要跨批次对照**，所以不受时段漂移和模型随机性的干扰。
+
+    对比 `agreement()`（跨两批逐条比）：那个指标把"模型自己的随机性"和"批次差异"混在一起，
+    必须配一条噪声基线才读得懂。这个不用。
+
+    分母是**任务数**不是执行数：30 条 × 3 次 → 30 个分母。
+    """
+    grouped: dict[str, list[tuple]] = {}
+    for outcome in outcomes:
+        grouped.setdefault(outcome.task_id, []).append(verdict_key(outcome))
+    stable = sum(1 for keys in grouped.values() if len(set(keys)) == 1)
+    total = len(grouped)
+    unstable = sorted(tid for tid, keys in grouped.items() if len(set(keys)) > 1)
+    return {
+        "tasks": total,
+        "stable": stable,
+        "rate": round(stable / total, 4) if total else 0.0,
+        "unstable_tasks": unstable,
+    }
+
+
+def agreement(baseline: list[Outcome], other: list[Outcome]) -> dict[str, Any]:
+    """逐条比判定签名。返回总一致率 + 三个分项 + 不一致的明细。
+
+    不一致的明细必须给出来：**只报一个 92% 没法判断是并发的问题还是模型随机性**，
+    得看到具体哪几条变了、变成什么。
+    """
+    if len(baseline) != len(other):
+        raise ValueError("两批执行数不同，不能逐条比：{0} vs {1}".format(len(baseline), len(other)))
+    same = 0
+    diffs: list[dict[str, Any]] = []
+    for base, cur in zip(baseline, other):
+        key_a, key_b = verdict_key(base), verdict_key(cur)
+        if key_a == key_b:
+            same += 1
+            continue
+        changed = [name for name, a, b in
+                   (("passed", key_a[0], key_b[0]), ("category", key_a[1], key_b[1]),
+                    ("state", key_a[2], key_b[2])) if a != b]
+        diffs.append({
+            "task_id": base.task_id, "run": base.run, "changed": changed,
+            "before": {"passed": base.passed, "category": base.category, "state": key_a[2]},
+            "after": {"passed": cur.passed, "category": cur.category, "state": key_b[2]},
+        })
+    total = len(baseline)
+    # 两边都是 request_error 时 passed/category/state 全一样，会被算成"一致"——
+    # 这是伪一致，单独把"双方都有效"的条数拎出来，让读者知道分母里有多少水
+    both_valid = [k for k, (a, b) in enumerate(zip(baseline, other)) if a.ok and b.ok]
+    valid_same = sum(1 for k in both_valid
+                     if verdict_key(baseline[k]) == verdict_key(other[k]))
+    return {
+        "total": total,
+        "same": same,
+        "rate": round(same / total, 4) if total else 0.0,
+        "valid_total": len(both_valid),
+        "valid_same": valid_same,
+        "valid_rate": round(valid_same / len(both_valid), 4) if both_valid else 0.0,
+        "diffs": diffs,
+    }
 
 
 def token_totals(outcomes: list[Outcome]) -> dict[str, int]:
