@@ -1,0 +1,218 @@
+{
+  "task_set": "all",
+  "tasks": [
+    "gen-s1-010",
+    "gen-s1-001",
+    "gen-s1-002",
+    "gen-s1-016",
+    "gen-s1-009",
+    "gen-s1-029",
+    "gen-s1-018",
+    "gen-s1-020",
+    "gen-s1-024",
+    "gen-s1-041",
+    "gen-s1-033",
+    "gen-s1-034",
+    "gen-s1-032",
+    "gen-s1-038",
+    "gen-s1-053",
+    "gen-s1-051",
+    "gen-s1-044",
+    "gen-s1-054",
+    "gen-s1-058",
+    "gen-s1-063",
+    "gen-s1-057",
+    "gen-s1-065",
+    "gen-s1-083",
+    "gen-s1-084",
+    "gen-s1-074",
+    "gen-s1-098",
+    "gen-s1-099",
+    "gen-s1-080",
+    "gen-s1-089",
+    "gen-s1-006"
+  ],
+  "task_count": 30,
+  "repeats": 3,
+  "executions_per_level": 90,
+  "min_waves": 3.0,
+  "agent": "full",
+  "model": "deepseek-flash",
+  "rows": [
+    {
+      "concurrency": 1,
+      "runs": 90,
+      "waves": 90.0,
+      "enough_waves": true,
+      "wall_s": 306.16,
+      "throughput": 0.294,
+      "ok": 90,
+      "request_error": 0,
+      "status_429": 0,
+      "other_status": [],
+      "latency_mean_ms": 3401.7,
+      "latency_p50_ms": 3915.9,
+      "pass_rate": 0.8667,
+      "within": {
+        "tasks": 30,
+        "stable": 30,
+        "rate": 1.0,
+        "unstable_tasks": []
+      },
+      "speedup": 1.0,
+      "agreement": {
+        "total": 90,
+        "same": 90,
+        "rate": 1.0,
+        "valid_total": 90,
+        "valid_same": 90,
+        "valid_rate": 1.0
+      }
+    },
+    {
+      "concurrency": 8,
+      "runs": 90,
+      "waves": 11.25,
+      "enough_waves": true,
+      "wall_s": 41.58,
+      "throughput": 2.165,
+      "ok": 90,
+      "request_error": 0,
+      "status_429": 0,
+      "other_status": [],
+      "latency_mean_ms": 3529.3,
+      "latency_p50_ms": 3997.5,
+      "pass_rate": 0.8667,
+      "within": {
+        "tasks": 30,
+        "stable": 30,
+        "rate": 1.0,
+        "unstable_tasks": []
+      },
+      "speedup": 7.36,
+      "agreement": {
+        "total": 90,
+        "same": 90,
+        "rate": 1.0,
+        "valid_total": 90,
+        "valid_same": 90,
+        "valid_rate": 1.0
+      }
+    },
+    {
+      "concurrency": 16,
+      "runs": 90,
+      "waves": 5.62,
+      "enough_waves": true,
+      "wall_s": 21.56,
+      "throughput": 4.174,
+      "ok": 90,
+      "request_error": 0,
+      "status_429": 0,
+      "other_status": [],
+      "latency_mean_ms": 3528.3,
+      "latency_p50_ms": 3998.9,
+      "pass_rate": 0.8667,
+      "within": {
+        "tasks": 30,
+        "stable": 30,
+        "rate": 1.0,
+        "unstable_tasks": []
+      },
+      "speedup": 14.2,
+      "agreement": {
+        "total": 90,
+        "same": 90,
+        "rate": 1.0,
+        "valid_total": 90,
+        "valid_same": 90,
+        "valid_rate": 1.0
+      }
+    },
+    {
+      "concurrency": 32,
+      "runs": 90,
+      "waves": 2.81,
+      "enough_waves": false,
+      "wall_s": 12.05,
+      "throughput": 7.467,
+      "ok": 90,
+      "request_error": 0,
+      "status_429": 0,
+      "other_status": [],
+      "latency_mean_ms": 3561.9,
+      "latency_p50_ms": 4170.1,
+      "pass_rate": 0.8667,
+      "within": {
+        "tasks": 30,
+        "stable": 30,
+        "rate": 1.0,
+        "unstable_tasks": []
+      },
+      "speedup": 25.41,
+      "agreement": {
+        "total": 90,
+        "same": 90,
+        "rate": 1.0,
+        "valid_total": 90,
+        "valid_same": 90,
+        "valid_rate": 1.0
+      }
+    }
+  ],
+  "baseline": {
+    "concurrency": 1,
+    "wall_s": 306.16,
+    "throughput": 0.294,
+    "pass_rate": 0.8667,
+    "latency_mean_ms": 3401.7,
+    "within_rate": 1.0
+  },
+  "best": {
+    "best": 32,
+    "why": "429 和 request_error 都是 0 的档里吞吐最高",
+    "row": {
+      "concurrency": 32,
+      "runs": 90,
+      "waves": 2.81,
+      "enough_waves": false,
+      "wall_s": 12.05,
+      "throughput": 7.467,
+      "ok": 90,
+      "request_error": 0,
+      "status_429": 0,
+      "other_status": [],
+      "latency_mean_ms": 3561.9,
+      "latency_p50_ms": 4170.1,
+      "pass_rate": 0.8667,
+      "within": {
+        "tasks": 30,
+        "stable": 30,
+        "rate": 1.0,
+        "unstable_tasks": []
+      },
+      "speedup": 25.41,
+      "agreement": {
+        "total": 90,
+        "same": 90,
+        "rate": 1.0,
+        "valid_total": 90,
+        "valid_same": 90,
+        "valid_rate": 1.0
+      }
+    },
+    "first_429": null,
+    "clean": [
+      1,
+      8,
+      16,
+      32
+    ],
+    "strictly_below_429": true,
+    "speedup": 25.41,
+    "waves": 2.81,
+    "enough_waves": false
+  },
+  "measured_at": "2026-10-26 09:55:48",
+  "detail": {}
+}

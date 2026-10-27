@@ -1,0 +1,106 @@
+{
+  "before": {
+    "A": {
+      "runs": 90,
+      "dropped": 0,
+      "pass_rate": 0.8556,
+      "red_rate": 0.0222,
+      "halluc_rate": 0.0667,
+      "malformed_rate": 0.0,
+      "wrong_state_rate": 0.0556,
+      "red_runs": 2,
+      "red_steps": 2,
+      "halluc_runs": 6,
+      "malformed_runs": 0,
+      "wrong_runs": 5,
+      "avg_steps": 3.87,
+      "red_tasks": [
+        "gen-s1-001"
+      ],
+      "red_task_runs": {
+        "gen-s1-001": 2
+      },
+      "multi": 1.0,
+      "multi_n": 12
+    },
+    "B": {
+      "runs": 88,
+      "dropped": 2,
+      "pass_rate": 0.7045,
+      "red_rate": 0.0682,
+      "halluc_rate": 0.0455,
+      "malformed_rate": 0.0,
+      "wrong_state_rate": 0.1818,
+      "red_runs": 6,
+      "red_steps": 9,
+      "halluc_runs": 4,
+      "malformed_runs": 0,
+      "wrong_runs": 16,
+      "avg_steps": 3.2,
+      "red_tasks": [
+        "gen-s1-001",
+        "gen-s1-002"
+      ],
+      "red_task_runs": {
+        "gen-s1-001": 3,
+        "gen-s1-002": 3
+      },
+      "multi": 0.0909,
+      "multi_n": 11
+    }
+  },
+  "after": {
+    "A": {
+      "runs": 90,
+      "dropped": 0,
+      "pass_rate": 0.8778,
+      "red_rate": 0.0333,
+      "halluc_rate": 0.0667,
+      "malformed_rate": 0.0,
+      "wrong_state_rate": 0.0222,
+      "red_runs": 3,
+      "red_steps": 3,
+      "halluc_runs": 6,
+      "malformed_runs": 0,
+      "wrong_runs": 2,
+      "avg_steps": 3.82,
+      "red_tasks": [
+        "gen-s1-001"
+      ],
+      "red_task_runs": {
+        "gen-s1-001": 3
+      },
+      "multi": 1.0,
+      "multi_n": 12
+    },
+    "B": {
+      "runs": 86,
+      "dropped": 4,
+      "pass_rate": 0.5581,
+      "red_rate": 0.1279,
+      "halluc_rate": 0.0349,
+      "malformed_rate": 0.0116,
+      "wrong_state_rate": 0.2674,
+      "red_runs": 11,
+      "red_steps": 14,
+      "halluc_runs": 3,
+      "malformed_runs": 1,
+      "wrong_runs": 23,
+      "avg_steps": 3.09,
+      "red_tasks": [
+        "gen-s1-001",
+        "gen-s1-002",
+        "gen-s1-009",
+        "gen-s1-016"
+      ],
+      "red_task_runs": {
+        "gen-s1-001": 3,
+        "gen-s1-002": 3,
+        "gen-s1-016": 3,
+        "gen-s1-009": 2
+      },
+      "multi": 0.1818,
+      "multi_n": 11
+    }
+  }
+}

@@ -1,0 +1,102 @@
+{
+  "tasks": 30,
+  "repeats": 3,
+  "executable": {
+    "all_ok": 30,
+    "crashed": 0,
+    "flaky": 0,
+    "executable_rate": 1.0,
+    "crashed_ids": [],
+    "flaky_ids": []
+  },
+  "deterministic": {
+    "judged": 30,
+    "consistent": 28,
+    "inconsistent": 2,
+    "consistency_rate": 0.9333
+  },
+  "inconsistent_detail": [
+    {
+      "task_id": "gen-s1-001",
+      "verdicts": [
+        {
+          "passed": true,
+          "category": null,
+          "state_digest": "c44aeecec53ca65f"
+        },
+        {
+          "passed": false,
+          "category": "forbidden_tool",
+          "state_digest": "558e1149116203cf"
+        },
+        {
+          "passed": false,
+          "category": "forbidden_tool",
+          "state_digest": "558e1149116203cf"
+        }
+      ],
+      "diffs": [
+        {
+          "run": 2,
+          "passed": false,
+          "category": "forbidden_tool",
+          "state_digest": "558e1149116203cf",
+          "steps": 3
+        },
+        {
+          "run": 3,
+          "passed": false,
+          "category": "forbidden_tool",
+          "state_digest": "558e1149116203cf",
+          "steps": 3
+        }
+      ],
+      "steps": [
+        2,
+        3,
+        3
+      ]
+    },
+    {
+      "task_id": "gen-s1-096",
+      "verdicts": [
+        {
+          "passed": false,
+          "category": "wrong_final_state",
+          "state_digest": "55c6712c694c68df"
+        },
+        {
+          "passed": false,
+          "category": "wrong_final_state",
+          "state_digest": "feede965b0e37c8c"
+        },
+        {
+          "passed": false,
+          "category": "wrong_final_state",
+          "state_digest": "feede965b0e37c8c"
+        }
+      ],
+      "diffs": [
+        {
+          "run": 2,
+          "passed": false,
+          "category": "wrong_final_state",
+          "state_digest": "feede965b0e37c8c",
+          "steps": 3
+        },
+        {
+          "run": 3,
+          "passed": false,
+          "category": "wrong_final_state",
+          "state_digest": "feede965b0e37c8c",
+          "steps": 3
+        }
+      ],
+      "steps": [
+        5,
+        3,
+        3
+      ]
+    }
+  ]
+}

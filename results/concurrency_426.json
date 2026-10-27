@@ -1,0 +1,83 @@
+{
+  "tasks": [
+    "gen-s1-010",
+    "gen-s1-001",
+    "gen-s1-002",
+    "gen-s1-016",
+    "gen-s1-009",
+    "gen-s1-029",
+    "gen-s1-018",
+    "gen-s1-020",
+    "gen-s1-024",
+    "gen-s1-041",
+    "gen-s1-033",
+    "gen-s1-034",
+    "gen-s1-032",
+    "gen-s1-038",
+    "gen-s1-053",
+    "gen-s1-051",
+    "gen-s1-044",
+    "gen-s1-054",
+    "gen-s1-058",
+    "gen-s1-063",
+    "gen-s1-057",
+    "gen-s1-065",
+    "gen-s1-083",
+    "gen-s1-084",
+    "gen-s1-074",
+    "gen-s1-098",
+    "gen-s1-099",
+    "gen-s1-080",
+    "gen-s1-089",
+    "gen-s1-006"
+  ],
+  "repeats": 14,
+  "executions": 420,
+  "level": 32,
+  "serial": {
+    "level": 1,
+    "runs": 30,
+    "wall_s": 117.37,
+    "throughput": 0.2556,
+    "status_429": 0,
+    "request_error": 0,
+    "other_status": [],
+    "latency_mean_ms": 3912.1,
+    "pass_rate": 0.8667,
+    "within": {
+      "tasks": 30,
+      "stable": 30,
+      "rate": 1.0,
+      "unstable_tasks": []
+    },
+    "waves": 30.0
+  },
+  "burst": {
+    "level": 32,
+    "runs": 420,
+    "wall_s": 56.66,
+    "throughput": 7.4128,
+    "status_429": 0,
+    "request_error": 0,
+    "other_status": [],
+    "latency_mean_ms": 4055.6,
+    "pass_rate": 0.869,
+    "within": {
+      "tasks": 30,
+      "stable": 28,
+      "rate": 0.9333,
+      "unstable_tasks": [
+        "gen-s1-001",
+        "gen-s1-038"
+      ]
+    },
+    "waves": 13.12,
+    "steps_total": 1614,
+    "steps_mean": 3.84
+  },
+  "speedup_by_throughput": 29.0,
+  "serial_projected_s": 1643.2,
+  "speedup_by_wall": 29.0,
+  "measured_at": "2026-10-26 11:31:10",
+  "note": "加速比用吞吐比（并发吞吐 ÷ 串行吞吐），不受波数影响；墙钟比那一列是按串行吞吐推算 420 次的耗时，两者在波数够时应该一致。"
+}
