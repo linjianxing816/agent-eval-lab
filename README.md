@@ -168,7 +168,7 @@ tests/           314 条测试，全部离线（FakeClient / MockTransport）
 
 1. **红线违规率不稳定**：基于 14 个事件（176 次执行），只能看趋势。同一批任务重跑，单模型多犯 2 次就足以改变判定（`gen-s1-009`/`016` 修前 0 次、修后 5 次，而这两条任务一个字没改）。
 2. **5 条任务断言太弱**：只断言 `status`、没有金额断言，测不出金额能力。
-3. **Docker 未验证**：提供了 `Dockerfile`（`python:3.11-slim` + 单阶段 + `CMD pytest`），但本机 Docker 引擎依赖 WSL2、`wsl.exe` 被安全策略拦，**未执行 `docker build`**。依赖清单已在干净 venv 验证（257 passed）。要复现请在能跑 Docker 的环境执行：
+3. **Docker 未验证**：提供了 `Dockerfile`（`python:3.11-slim` + 单阶段 + `CMD pytest`），但本机 Docker 引擎依赖 WSL2、`wsl.exe` 被安全策略拦，**未执行 `docker build`**。依赖清单已在干净 venv 验证通过（当时的测试数少于现在的 314 条，之后新增的测试未在该环境复跑）。要复现请在能跑 Docker 的环境执行：
 
    ```bash
    docker build -t evalkit .
