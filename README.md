@@ -158,7 +158,7 @@ evalkit/         评测库（环境、循环、判定、指标、生成器、质
 server/          平台（FastAPI + 单页前端）
 tasks/           任务集（人工 42 条 + 自动生成 100 条 + 探针）
 results/         日志、报告页、perf 数据、evalkit.db（SQLite）
-docs/            契约、任务格式、场景说明、开发日志（21 条踩坑）
+docs/            契约、任务格式、场景说明、开发日志（33 条踩坑）
 tests/           314 条测试，全部离线（FakeClient / MockTransport）
 ```
 

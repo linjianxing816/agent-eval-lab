@@ -1,4 +1,10 @@
-"""D19 平台接口测试。全部离线：跑任务那条把 DeepSeekClient 换成 FakeClient。"""
+"""D19 平台接口测试。全部离线：跑任务那条把 DeepSeekClient 换成 FakeClient。
+
+**写库也要隔离**：`POST /api/run` 会往 `runs`/`steps` 表插数据，
+用真库跑一遍测试就多 4 条 `batch='platform'` 的脏数据——
+`/api/runs` 里会多出一个平台批次，指标统计也会被污染。
+所以 `db_engine` fixture 把 `get_engine` 换到 tmp_path 下的空库。
+"""
 from __future__ import annotations
 
 import json
@@ -7,11 +13,22 @@ import pytest
 from fastapi.testclient import TestClient
 
 from evalkit.client import FakeClient
+from evalkit.db import get_engine, init_db
 from server import app as platform
 
 
 @pytest.fixture()
-def client():
+def db_engine(tmp_path, monkeypatch):
+    """每个测试一个临时库，**不碰 results/evalkit.db**。"""
+    engine = init_db(get_engine("sqlite:///" + str(tmp_path / "platform.db")))
+    monkeypatch.setattr(platform, "get_engine", lambda *a, **k: engine)
+    # 批次列表也走同一个库（否则会读到真库的 14 个批次）
+    monkeypatch.setattr(platform.db_queries, "get_engine", lambda *a, **k: engine)
+    return engine
+
+
+@pytest.fixture()
+def client(db_engine):
     return TestClient(platform.app)
 
 

@@ -258,3 +258,65 @@ def available_batches(engine=None) -> list[str]:
     except Exception:
         return []
     return [r[0] for r in rows]
+
+
+def list_batches(engine=None, canonical: tuple[str, ...] = FINAL_BATCHES) -> list[dict]:
+    """批次清单：每批跑了多少次、覆盖多少任务、通过多少、时间范围。
+
+    **替代"扫 results/*.json 看文件大小"**——文件字节数说明不了任何事，
+    跑 90 次和跑 30 次的 jsonl 可能差不多大。
+
+    `canonical` 标记定稿批次（`d26_modela` / `d26_modelb`）：
+    804 条 runs 里其余 12 个批次是修坏题**之前**的数据，结论是反的，
+    混在一起算就会把两个时代的数据掺起来。
+    """
+    eng = engine or get_engine()
+    rows = _run(eng, """
+        SELECT batch,
+               COUNT(*) AS runs,
+               COUNT(DISTINCT task_id) AS tasks,
+               COALESCE(SUM(CASE WHEN passed THEN 1 ELSE 0 END), 0) AS passed,
+               MIN(created_at) AS first_at,
+               MAX(created_at) AS last_at
+        FROM runs
+        GROUP BY batch
+        ORDER BY MIN(created_at) DESC, batch
+    """)
+    out: list[dict] = []
+    for batch, n, task_n, passed, first_at, last_at in rows:
+        out.append({
+            "name": batch,
+            "runs": int(n),
+            "tasks": int(task_n),
+            "passed": int(passed),
+            "first": str(first_at)[:16] if first_at else "",
+            "last": str(last_at)[:16] if last_at else "",
+            "canonical": batch in canonical,
+            "source": "db",
+        })
+    return out
+
+
+def batch_summary(batch: str, engine=None) -> dict[str, Any] | None:
+    """单个批次的统计，给 `/api/runs/{批次名}` 用。
+
+    返回结构和 `report_data.json` 里前端认得的字段对齐（`cards` / `matrix` / `gate` 的简化版），
+    这样前端不用为"批次"和"报告"写两套渲染逻辑。
+    """
+    eng = engine or get_engine()
+    info = next((b for b in list_batches(eng) if b["name"] == batch), None)
+    if info is None:
+        return None
+    pass_stat = pass_rate_by_agent(eng, (batch,))
+    red_stat = red_line_rate_by_agent(eng, (batch,))
+    cross = category_cross_table(eng, (batch,))
+    return {
+        "name": batch,
+        "batch": info,
+        "pass": pass_stat,
+        "red": red_stat,
+        "cross": cross,
+        "unstable": [t["task_id"] for t in unstable_tasks(eng)],
+        "note": ("批次级统计：只算这一个批次，不剔除 request_error 之外的任何东西。"
+                 "定稿结论看 report_data 的模型对比（那才是跨批次合并后的结果）。"),
+    }

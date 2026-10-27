@@ -174,3 +174,48 @@ def severity_from_row(row: dict, task: dict) -> str:
         return "failed"
     verdict = check_outcome(row.get("final_state") or {}, task.get("success_criteria") or [])
     return "critical" if verdict.passed else "failed"
+
+
+def next_run_index(conn, task_id: str, agent: str, model: str, batch: str) -> int:
+    """同一 `(task, agent, model, batch)` 的下一个 run 号。
+
+    **不能让调用方自己数**：平台连着跑同一条任务两次，两边都从 0 开始，
+    唯一约束会把第二次挡掉——看起来"跑了但没存"。
+    """
+    from sqlalchemy import func as _func
+    from sqlalchemy import select as _select
+
+    current = conn.execute(
+        _select(_func.max(runs.c.run_index)).where(
+            (runs.c.task_id == task_id) & (runs.c.agent == agent)
+            & (runs.c.model == model) & (runs.c.batch == batch))
+    ).scalar()
+    return int(current) + 1 if current is not None else 0
+
+
+def save_run(engine, run_row: dict, step_rows: list[dict] | None = None) -> int:
+    """写一条 run + 它的 steps，返回 `run_id`。
+
+    **平台（`POST /api/run`）用这个**，和 `migrate_to_db.py` 写同一张表、同一套字段。
+    不在这里做"跑完再转存"的中间层——那会变成两份格式，迟早对不上。
+
+    `run_row` 缺 `severity` 时用 `severity_from_row()` 现算（和迁移时同一条规则）；
+    缺 `run_index` 时用 `next_run_index()` 自增。
+    """
+    with engine.begin() as conn:
+        row = dict(run_row)
+        if "severity" not in row:
+            row["severity"] = severity_from_row(row, row.pop("task_def", {}))
+        else:
+            row.pop("task_def", None)
+        if row.get("run_index") is None:
+            row["run_index"] = next_run_index(
+                conn, row["task_id"], row["agent"], row["model"], row["batch"])
+        if row.get("created_at") is None:
+            from datetime import datetime
+            row["created_at"] = datetime.now()
+        result = conn.execute(runs.insert().values(**row))
+        run_id = result.inserted_primary_key[0]
+        if step_rows:
+            conn.execute(steps.insert(), [dict(s, run_id=run_id) for s in step_rows])
+    return int(run_id)

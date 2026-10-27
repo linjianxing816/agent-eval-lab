@@ -47,13 +47,13 @@ button:disabled{background:#9bb3d6;border-color:#9bb3d6;cursor:default}
 </head>
 <body><div class="wrap">
 <h1>LLM Agent 评测平台</h1>
-<div class="meta">实验列表来自 <span class="mono">results/*.json</span>；跑任务是现场调 <span class="mono">run_task</span> + <span class="mono">judge_task</span>，不复制任何判定逻辑。</div>
+<div class="meta">批次列表来自 <span class="mono">runs</span> 表（跑了几次 / 多少任务 / 时间范围），报告文件来自 <span class="mono">results/*.json</span>；跑任务是现场调 <span class="mono">run_task</span> + <span class="mono">judge_task</span>，结果写回 <span class="mono">runs</span>/<span class="mono">steps</span>，不复制任何判定逻辑。</div>
 
 <div class="grid2">
   <div>
     <h2>一、实验列表</h2>
-    <table id="runs"><thead><tr><th>实验</th><th>时间</th><th>门禁</th><th>矩阵</th></tr></thead>
-    <tbody><tr><td colspan="4" class="hint">加载中…</td></tr></tbody></table>
+    <table id="runs"><thead><tr><th>批次 / 实验</th><th>执行数</th><th>时间</th><th>门禁</th><th>矩阵</th></tr></thead>
+    <tbody><tr><td colspan="5" class="hint">加载中…</td></tr></tbody></table>
   </div>
   <div>
     <h2>二、实验详情</h2>
@@ -103,17 +103,19 @@ async function loadRuns() {
   const body = $('runs').querySelector('tbody');
   try {
     const { runs } = await getJSON('/api/runs');
-    if (!runs.length) { body.innerHTML = '<tr><td colspan="4" class="hint">results/ 下没有 json</td></tr>'; return; }
+    if (!runs.length) { body.innerHTML = '<tr><td colspan="5" class="hint">DB 和 results/ 都没有数据</td></tr>'; return; }
     body.innerHTML = runs.map(r => `
       <tr class="click" data-name="${esc(r.name)}">
-        <td class="mono">${esc(r.name)}</td>
-        <td class="hint">${esc(r.mtime)}</td>
+        <td class="mono">${esc(r.name)}${r.canonical ? ' <span class="badge p">定稿</span>' : ''}${
+          r.source === 'db' ? '' : ' <span class="hint">(文件)</span>'}</td>
+        <td class="n">${r.runs == null ? '<span class="hint">—</span>' : r.runs}</td>
+        <td class="hint">${esc(r.mtime || '')}</td>
         <td>${r.gate_status ? `<span class="badge ${r.gate_status === 'PASS' ? 'p' : 'f'}">${esc(r.gate_status)}</span>` : '<span class="hint">—</span>'}</td>
         <td class="hint">${r.has_matrix ? '有' : '—'}</td>
       </tr>`).join('');
     body.querySelectorAll('tr.click').forEach(tr => tr.onclick = () => openRun(tr.dataset.name, tr));
   } catch (err) {
-    body.innerHTML = `<tr><td colspan="4" class="hint">加载失败：${esc(err.message)}</td></tr>`;
+    body.innerHTML = `<tr><td colspan="5" class="hint">加载失败：${esc(err.message)}</td></tr>`;
   }
 }
 
@@ -125,7 +127,38 @@ async function openRun(name, tr) {
   box.className = 'card';
   box.innerHTML = '<span class="hint">加载中…</span>';
   try {
-    const { data } = await getJSON('/api/runs/' + encodeURIComponent(name));
+    const { data, source } = await getJSON('/api/runs/' + encodeURIComponent(name));
+
+    // 批次详情：DB 现算（data.batch 有值就走这条）
+    if (data.batch) {
+      const b = data.batch;
+      const keys = Object.keys(data.pass || {});
+      let html = `<div class="meta">批次 <span class="mono">${esc(b.name)}</span>：
+        <strong>${b.runs}</strong> 次执行 / ${b.tasks} 条任务 / 通过 ${b.passed} 次
+        ${b.canonical ? '<span class="badge p">定稿批次</span>' : '<span class="hint">历史批次</span>'}
+        <br><span class="hint">${esc(b.first)} → ${esc(b.last)}｜${esc(data.note || '')}</span></div>`;
+      html += `<table style="margin-top:10px"><thead><tr><th>agent@model</th><th>执行数</th>
+        <th>通过</th><th>通过率</th><th>红线</th><th>红线率</th></tr></thead><tbody>
+        ${keys.map(k => {
+          const p = data.pass[k], r = (data.red || {})[k] || {};
+          return `<tr><td class="mono">${esc(k)}</td><td class="n">${p.runs}</td>
+            <td class="n">${p.passed}</td><td class="n">${num(p.pass_rate)}</td>
+            <td class="n">${r.red_runs ?? '—'}</td><td class="n">${num(r.red_rate)}</td></tr>`;
+        }).join('')}</tbody></table>`;
+      const cross = data.cross || [];
+      if (cross.length) {
+        const models = keys.length ? keys : [];
+        html += `<table style="margin-top:12px"><thead><tr><th>类别</th>
+          ${models.map(m => `<th>${esc(m)} 通过率 (N)</th>`).join('')}</tr></thead><tbody>
+          ${cross.map(row => `<tr><td>${esc(row.scenario)}</td>${models.map(m => {
+            const c = row[m];
+            return `<td class="n">${c ? `${num(c.pass)} (${c.n})` : '—'}</td>`;
+          }).join('')}</tr>`).join('')}</tbody></table>`;
+      }
+      box.innerHTML = html;
+      return;
+    }
+
     let html = '';
     if (data.gate) {
       const g = data.gate;
