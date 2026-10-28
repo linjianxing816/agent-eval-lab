@@ -1,5 +1,7 @@
 # Agent 评测任务生成与质量验证
 
+[![test](https://github.com/linjianxing816/agent-eval-lab/actions/workflows/test.yml/badge.svg)](https://github.com/linjianxing816/agent-eval-lab/actions/workflows/test.yml)
+
 让 LLM 生成 Agent 评测任务，然后**验证这些任务本身能不能用**，最后用合格的题去评测 Agent。
 
 不是"用任务集测模型"，是"**测任务集**"。

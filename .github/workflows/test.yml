@@ -1,0 +1,51 @@
+# 全量测试。push / PR 都跑。
+#
+# **全离线**：workflow 里没有任何 secret，也不需要配 API key。
+# 理由：所有涉及模型的测试都用 FakeClient 或 httpx.MockTransport 顶掉了真实请求
+# （tests/ 下没有一处调用 load_env() 或构造真实 ChatClient），跑一次 CI 花 0 元。
+#
+# ── 已知会被 skip 的测试（不是静默跳过，日志里能看到原因）──────────────────
+# tests/test_db_d30.py::test_db_matches_jsonl
+#   依赖本地文件 results/evalkit.db。它比的是「同一个库里迁出来的数字」和
+#   「同一批 jsonl 算出来的数字」是否一致，没有 .db 就无从比起。
+#   .db 由 scripts/migrate_to_db.py 从 14 个批次生成，体积大且可重建，因此不入 git
+#   （见 .gitignore 的 results/* 规则），所以 CI 上必然没有它，测试内部走
+#   `pytest.skip("库还没迁，跳过")`。
+#   **这是「依赖本地数据文件」，不是「依赖 Windows 路径」**——测试里没有任何
+#   C:\ / os.name / platform.system 的判断，换到 Linux 不需要改一行测试。
+#   → CI 结果：313 passed, 1 skipped；本地（跑过迁移）仍是 314 passed。
+#
+# 为什么不把这条测试改成能在 CI 跑：要在 CI 里跑它，就得先跑迁移，
+# 而迁移依赖 14 个批次的 jsonl——大部分没进 git（results/* 默认忽略）。
+# 为了一个「DB 和 jsonl 数字一致」的回归测试，把几 MB 原始轨迹塞进仓库不划算。
+#
+# ── 本轮不做 ────────────────────────────────────────────────────────────
+# 没有 lint / type check。这轮只做测试，加了也没人看。
+
+name: test
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: 安装依赖
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      # -rs 把每个 skip 的原因打出来。只写 -q 的话 CI 是绿的，
+      # 但没人知道有测试没跑——那正是「静默 pass」，比红着更糟。
+      - name: 跑全量测试
+        run: python -m pytest tests -q -rs
