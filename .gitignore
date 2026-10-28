@@ -18,6 +18,8 @@ results/*
 # d8_run.log         93.3% 的逐任务判定记录
 # concurrency*.json  4 档并发 sweep + 420 次压测
 # d26_*.jsonl        修后 A/B 各 90 次原始轨迹
+# report_data.json   报告页数据源 + README 每个数字的原始依据；平台 2 条接口测试要用它，
+#                    且 CI 里没法重新生成（14 个批次大部分不入库），所以必须进 git
 !results/check_all_old.txt
 !results/check_all.txt
 !results/audit_s2.json
@@ -29,6 +31,7 @@ results/*
 !results/d26_modelb.jsonl
 !results/d26_a_run.log
 !results/d26_b_run.log
+!results/report_data.json
 
 # 编辑器
 .vscode/

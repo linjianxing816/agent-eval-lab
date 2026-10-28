@@ -19,6 +19,13 @@
 # 而迁移依赖 14 个批次的 jsonl——大部分没进 git（results/* 默认忽略）。
 # 为了一个「DB 和 jsonl 数字一致」的回归测试，把几 MB 原始轨迹塞进仓库不划算。
 #
+# ── 为什么 results/report_data.json 要进 git ────────────────────────────
+# tests/test_platform_d19.py 有 2 条测试直接调 /api/runs 和 /api/runs/report_data，
+# 没有这个文件就红（第一版 CI 就是这么红的）。它 36 KB，是报告页的数据源、
+# README 上每个数字的原始依据，本来就在 .gitignore 白名单的语义里
+# （「简历/README 上每个数字的原始依据，必须能被验证」），所以补进白名单，
+# 而不是去改测试跳过它。
+#
 # ── 本轮不做 ────────────────────────────────────────────────────────────
 # 没有 lint / type check。这轮只做测试，加了也没人看。
 
@@ -47,5 +54,14 @@ jobs:
 
       # -rs 把每个 skip 的原因打出来。只写 -q 的话 CI 是绿的，
       # 但没人知道有测试没跑——那正是「静默 pass」，比红着更糟。
+      #
+      # env 里那三个是**假配置**，只为过 load_settings() 的存在性检查。
+      # POST /api/run 的两个测试会把 platform.DeepSeekClient 换成 FakeClient，
+      # 这三个值不会被拿去发请求；写死假值同时保证 CI 里没有任何真 key。
+      # （第一版没加这个 env，CI 红了 4 个：2 个缺配置、2 个缺 report_data.json。）
       - name: 跑全量测试
+        env:
+          AI_BASE_URL: https://example.invalid/v1
+          AI_API_KEY: ci-dummy-not-a-real-key
+          AI_MODEL: ci-dummy-model
         run: python -m pytest tests -q -rs
