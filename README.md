@@ -2,11 +2,11 @@
 
 [![test](https://github.com/linjianxing816/agent-eval-lab/actions/workflows/test.yml/badge.svg)](https://github.com/linjianxing816/agent-eval-lab/actions/workflows/test.yml)
 
-让 LLM 生成 Agent 评测任务，然后**验证这些任务本身能不能用**，最后用合格的题去评测 Agent。
+让 LLM 生成 Agent 评测任务，然后**先验证这些任务本身能不能用**，再用合格的题去评测 Agent。
 
-不是"用任务集测模型"，是"**测任务集**"。
+区别不在"测不测模型"，而在**测模型之前先不先验证题**——大部分评测默认题目是可信的，这个项目从怀疑题目开始。
 
-`Python/FastAPI + SQLite + Function Calling + SSE 流式 + 多模型适配`
+`Python/FastAPI + SQLAlchemy + Function Calling + SSE 流式 + 多模型适配`
 
 ```
 两个模型 × 90 次执行，同一套 30 条任务
