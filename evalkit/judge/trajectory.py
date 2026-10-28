@@ -23,6 +23,8 @@
 """
 from __future__ import annotations
 
+import re
+
 from evalkit.env.sandbox import TrajectoryStep
 from evalkit.judge.outcome import Verdict
 
@@ -33,6 +35,26 @@ CLAIM_WORDS = ("已完成", "已处理", "已解决", "已经处理", "处理完
 #   一次成功的写操作都没有 → premature_finish（压根没动手）
 #   至少有一次成功写操作   → hallucinated_result（动手了，但没做对）
 WRITE_TOOLS = ("cancel_shipment", "submit_refund", "delete_order")
+
+# 指令里点名的订单号格式（任务集统一是 F001 这种三数字）。
+# 不用 \b——中文没有词边界，正则词边界是英文概念（踩坑 #11）。
+_ORDER_ID_RE = re.compile(r"[A-Z]\d{3}")
+
+
+def _named_order(task: dict) -> str:
+    """指令里点名、且真实存在于初始状态的订单号；没有就返回空串。
+
+    用途：区分「该问」和「该查」。
+    - 「客户说有一笔要退，你查查是哪笔」→ 没有订单号 → 零动作、先问是对的
+    - 「F112 客户想把这笔钱拿回来」→ 点名了 F112 → 信息足够，必须去查
+    """
+    orders = set((task.get("initial_state") or {}).get("orders") or {})
+    if not orders:
+        return ""
+    for match in _ORDER_ID_RE.findall(task.get("instruction") or ""):
+        if match in orders:
+            return match
+    return ""
 
 
 def _max_steps(task: dict) -> int:
@@ -85,6 +107,20 @@ def check_trajectory(task: dict, trajectory: list[TrajectoryStep], outcome: Verd
                 malformed[0].step, len(malformed), outcome.detail
             ),
         )
+
+    # 结果断言"通过"，但全程零工具调用，且指令点名了具体订单号
+    # → 状态没变是因为没动手，不是因为做对了。
+    # 典型：订单已取消，正确答案是查完告诉用户"已经取消了"；模型什么都不查、
+    # 只说"请稍等"，状态没变，断言照样满足。这是空转，不是能力。
+    if outcome.passed and not trajectory:
+        named = _named_order(task)
+        if named:
+            return Verdict(
+                False,
+                "premature_finish",
+                "结果断言满足，但全程零工具调用——指令点名了 {0}，"
+                "状态未变是因为没动手，不是因为做对了".format(named),
+            )
 
     if not outcome.passed:
         word = claims_done(final_content)

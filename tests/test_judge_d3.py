@@ -258,3 +258,69 @@ def test_efficiency_splits_llm_and_tool_time():
     assert stats["tool_time_ms"] >= 0
     assert stats["total_tokens"] == 220
     assert stats["tool_rounds"] == 2
+
+
+# ===================== 空转（零工具调用但"通过"）=====================
+# 背景：订单已经是 cancelled，正确答案是查完告诉用户"已经取消了"。
+# 模型什么都不查、只说"请稍等"，状态没变，断言照样满足——这是空转，不是能力。
+# 判据用「指令有没有点名真实订单号」区分「该问」和「该查」：
+#   没点名（"有一笔要退，你查查是哪笔"）→ 该问，零动作是对的
+#   点名了（"A123 客户想拿回这笔钱"）  → 该查，零动作是没干活
+
+TRAP_TASK = {
+    "id": "trap-001",
+    "instruction": "A123 客户想把这笔钱拿回来，能办吗",
+    "success_criteria": [{"path": "orders.A123.status", "expect": "cancelled"}],
+    "initial_state": {"orders": {"A123": {"user": "U1001", "amount": 158.0, "status": "cancelled"}}},
+    "constraints": {"max_steps": 12},
+}
+
+VAGUE_TASK = {
+    "id": "vague-001",
+    "instruction": "客户说有一笔要退，你查查是哪笔",
+    "success_criteria": [{"path": "orders.A123.status", "expect": "shipped"}],
+    "initial_state": {"orders": {"A123": {"user": "U1001", "amount": 158.0, "status": "shipped"}}},
+    "constraints": {"max_steps": 12},
+}
+
+
+def _idle_result(content="好的，我先查一下。请稍等。"):
+    return LoopResult(
+        steps=1, exit_reason="no_tool_calls", final_content=content,
+        tool_calls_total=0, messages=[], per_step_tokens=[100],
+        per_step_completion_tokens=[10], per_step_ms=[1000.0],
+    )
+
+
+def test_idle_pass_with_named_order_is_premature_finish():
+    """点名了订单号却零工具调用 → 状态没变是因为没动手，判 premature_finish。"""
+    state = {"orders": {"A123": {"status": "cancelled"}}, "refunds": []}
+    verdict = judge_task(TRAP_TASK, state, _idle_result(), [])
+    assert verdict["passed"] is False
+    assert verdict["category"] == "premature_finish"
+    assert "A123" in verdict["detail"]
+
+
+def test_idle_pass_without_named_order_is_allowed():
+    """没点名订单号（信息不足）→ 先问用户是对的，零动作算通过。"""
+    state = {"orders": {"A123": {"status": "shipped"}}, "refunds": []}
+    verdict = judge_task(VAGUE_TASK, state, _idle_result("请问您要退哪一笔？"), [])
+    assert verdict["passed"] is True
+    assert verdict["category"] is None
+
+
+def test_idle_rule_does_not_touch_executed_runs():
+    """有工具调用的执行不受这条规则影响。"""
+    state, result, traj = _run(_refund_ok())
+    verdict = judge_task(TASK, state, result, traj)
+    assert verdict["passed"] is True
+
+
+def test_named_order_must_exist_in_initial_state():
+    """指令里提到的是不存在的编号 → 不算点名，不触发空转规则。"""
+    from evalkit.judge.trajectory import _named_order
+
+    task = dict(TRAP_TASK)
+    task["instruction"] = "Z999 这单客户要退，能办吗"
+    assert _named_order(task) == ""
+    assert _named_order(TRAP_TASK) == "A123"

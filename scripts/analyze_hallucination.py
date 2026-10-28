@@ -86,7 +86,7 @@ def classify(row: dict, task: dict) -> tuple[str, str]:
     """按「幻觉发生在哪一层」分类。返回 (层, 子形态)。
 
     判定顺序：先看实体（有没有引用不存在的东西）→ 再看数值（金额有没有工具依据）
-    → 再看工具返回（说的和返回的对不对得上）→ 都不成立就是「意图层」。
+    → 再看工具返回（说的和返回的对不对得上）→ 都不成立就是「状态层」。
     """
     # L1 实体层：引用了环境里不存在的 order_id
     if has_error_result(row):
@@ -102,8 +102,10 @@ def classify(row: dict, task: dict) -> tuple[str, str]:
     )
     if claims_refund and not row["final_state"].get("refunds"):
         return "L3", "声称已退款但环境里没有退款记录"
-    # L4 意图层：动作合规、金额正确、content 与环境一致，但断言的期望与指令相反
-    return "L4", "动作与 success_criteria 期望相反（题面自相矛盾）"
+    # L4 状态层：订单初始已是 cancelled，仍执行 submit_refund（重复退款）。
+    # 注意：这不是「题错」。工具只执行不裁决，状态机允许 cancelled→refunded，
+    # 但业务上「已取消的订单再退一次」是重复退款，判定层判失败是对的。
+    return "L4", "重复退款：订单已取消仍执行退款（模型没把状态当决策依据）"
 
 
 def claim_hit(content: str) -> str:
