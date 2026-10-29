@@ -1,10 +1,11 @@
-# Agent 评测任务生成与质量验证
+# Agent 测试用例生成与质量验证
 
 [![test](https://github.com/linjianxing816/agent-eval-lab/actions/workflows/test.yml/badge.svg)](https://github.com/linjianxing816/agent-eval-lab/actions/workflows/test.yml)
 
-让 LLM 生成 Agent 评测任务，然后**先验证这些任务本身能不能用**，再用合格的题去评测模型在 Agent 场景下的行为。
+让 LLM 生成 Agent 测试用例，然后**先验证用例本身能不能用**，再用合格的用例去测模型在 Agent 场景下的行为。
 
-区别不在"测不测模型"，而在**测模型之前先不先验证题**——大部分评测默认题目是可信的，这个项目从怀疑题目开始。
+**坏用例不会随机分布**——它系统性偏袒某一类模型，多跑几次也平均不掉。
+所以这个项目的第一件事不是测模型，是测用例。
 
 `Python/FastAPI + SQLAlchemy + Function Calling + SSE 流式 + 多模型适配`
 
